@@ -209,7 +209,6 @@ final class InstallService
         }
 
         (new ConfigFile($this->paths->configFile()))->write($raw);
-        (new SetupKey($this->paths->setupKeyFile()))->consume();
 
         return ['http_token' => $httpToken, 'migrated' => $migrated];
     }

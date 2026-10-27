@@ -62,7 +62,7 @@ return [
 
     // Web admin at /setup.php (settings, access tokens, FTP, updates).
     'admin' => [
-        // password_hash() of the admin password. Remove it to reset the password with a setup key.
+        // password_hash() of the admin password. Forgot it? Use "Forgot the password?" on the login page.
         'password_hash' => '',
         // false = setup.php answers 404 (manage everything via this file and bin/*.php).
         'web_enabled' => true,

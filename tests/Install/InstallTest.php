@@ -10,8 +10,8 @@ use VamsysMcp\Install\ConfigFile;
 use VamsysMcp\Install\EncryptedSettings;
 use VamsysMcp\Install\InstallService;
 use VamsysMcp\Install\Migrator;
+use VamsysMcp\Install\OwnershipProof;
 use VamsysMcp\Install\SecretBox;
-use VamsysMcp\Install\SetupKey;
 use VamsysMcp\Paths;
 use VamsysMcp\Tests\Support\FakeHttpClient;
 use VamsysMcp\Tests\Support\TempDir;
@@ -84,16 +84,20 @@ final class InstallTest extends TestCase
         }
     }
 
-    public function testSetupKey(): void
+    public function testOwnershipProofNeedsTheFileForThisSessionsCode(): void
     {
-        $key = new SetupKey("{$this->dir}/var/setup-key.txt");
-        $key->ensure();
-        $value = trim((string) file_get_contents($key->path()));
+        $proof = new OwnershipProof($this->dir);
+        $code = OwnershipProof::newCode();
 
-        self::assertFalse($key->verify('wrong'));
-        self::assertTrue($key->verify(" {$value}\n"));
-        $key->consume();
-        self::assertFalse($key->verify($value));
+        self::assertFalse($proof->verify($code));
+        file_put_contents("{$this->dir}/" . $proof->fileName(OwnershipProof::newCode()), '');
+        self::assertFalse($proof->verify($code), 'a file for another code must not unlock');
+
+        file_put_contents("{$this->dir}/" . $proof->fileName($code), '');
+        self::assertTrue($proof->verify($code));
+        self::assertFalse($proof->verify('../' . $code), 'codes are validated');
+        self::assertTrue($proof->remove($code));
+        self::assertFalse($proof->verify($code));
     }
 
     public function testBuildConfigOnFreshInstallRequiresEverything(): void

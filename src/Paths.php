@@ -35,11 +35,6 @@ final class Paths
         return $this->root . '/migrations';
     }
 
-    public function setupKeyFile(): string
-    {
-        return $this->var('setup-key.txt');
-    }
-
     public function maintenanceFlag(): string
     {
         return $this->var('maintenance');

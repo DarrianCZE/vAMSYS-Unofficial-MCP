@@ -15,8 +15,8 @@ use VamsysMcp\Install\EncryptedSettings;
 use VamsysMcp\Install\FtpCredentials;
 use VamsysMcp\Install\InstallService;
 use VamsysMcp\Install\Migrator;
+use VamsysMcp\Install\OwnershipProof;
 use VamsysMcp\Install\SecretBox;
-use VamsysMcp\Install\SetupKey;
 use VamsysMcp\Paths;
 use VamsysMcp\Update\FtpFileWriter;
 use VamsysMcp\Update\GitHubReleases;
@@ -28,8 +28,8 @@ use VamsysMcp\Update\UpdateJob;
 /**
  * Web installer and admin UI (public/setup.php).
  *
- * States: not installed → setup key + install form; installed without admin
- * password → setup key + set password; otherwise login → admin pages.
+ * States: not installed → ownership proof + install form; installed without admin
+ * password (or "forgot password") → ownership proof + set password; otherwise login → admin pages.
  * Only reachable over HTTPS (or from localhost); every POST needs the CSRF token.
  */
 final class AdminApp
@@ -176,30 +176,39 @@ final class AdminApp
     }
 
     /**
-     * Setup-key gate. Returns true when the session is unlocked.
+     * Ownership gate (see OwnershipProof). Returns true when the session is unlocked.
      */
     private function unlockFlow(?string $action, string $purpose): bool
     {
         if (Session::isUnlocked()) {
             return true;
         }
-        $key = new SetupKey($this->paths->setupKeyFile());
-        $key->ensure();
+        $code = Session::get('proof_code');
+        if (!OwnershipProof::isValidCode($code)) {
+            $code = OwnershipProof::newCode();
+            Session::set('proof_code', $code);
+        }
+        $proof = new OwnershipProof($this->paths->root);
         $error = '';
         if ($action === 'unlock') {
-            if ($key->verify((string) ($_POST['setup_key'] ?? ''))) {
+            if ($proof->verify($code)) {
                 Session::unlock();
+                Session::set('proof_code', null);
+                if (!$proof->remove($code)) {
+                    Session::flash('warn', "Done. Please delete {$proof->fileName($code)} from the installation folder; it is no longer needed.");
+                }
 
                 return true;
             }
-            sleep(1);
-            $error = '<div class="flash error">That setup key is not correct.</div>';
+            $error = '<div class="flash error">The file was not found yet. Check the name and the folder, then try again.</div>';
         }
-        $this->send(200, $purpose . ': unlock', $error
-            . '<p>To prove you control this server, open this file with FTP or your hosting file manager and paste its content:</p>'
-            . '<pre>' . Html::e($key->path()) . '</pre>'
-            . '<form method="post" action="?a=unlock">' . $this->html->csrfField()
-            . $this->html->input('Setup key', 'setup_key', '', 'password') . '<button>Unlock</button></form>');
+        $this->send(200, $purpose . ': prove you control this server', $error
+            . '<ol><li>Connect with FTP, or open your hosting file manager.</li>'
+            . '<li>Go to the installation folder: the one that contains <code>public</code>, <code>src</code> and <code>vendor</code>. On this server it is:<pre>' . Html::e($proof->folder()) . '</pre></li>'
+            . '<li>Create an empty file with exactly this name:<pre>' . Html::e($proof->fileName($code)) . '</pre></li>'
+            . '<li>Click Continue.</li></ol>'
+            . '<form method="post" action="?a=unlock">' . $this->html->csrfField() . '<button>Continue</button></form>'
+            . '<p class="help">Only someone with access to the server\'s files can create that file, so nobody else can use this page. The code is new for every browser session.</p>');
 
         return false;
     }
@@ -225,7 +234,6 @@ final class AdminApp
             } else {
                 $raw['admin']['password_hash'] = password_hash($password, PASSWORD_DEFAULT);
                 $this->configFile->write($raw);
-                (new SetupKey($this->paths->setupKeyFile()))->consume();
                 Session::login();
                 $this->redirect('?p=dashboard', 'ok', 'Admin password set.');
 
@@ -246,6 +254,11 @@ final class AdminApp
     {
         if (self::isJsonAction($action)) {
             $this->json(['phase' => 'failed', 'error' => 'You were logged out; log in again and resume the update.'], 401);
+
+            return;
+        }
+        if (($_GET['p'] ?? '') === 'reset' || in_array($action, ['unlock', 'set-password'], true)) {
+            $this->resetPasswordFlow($raw, $action);
 
             return;
         }
@@ -275,7 +288,7 @@ final class AdminApp
             . '<form method="post" action="?a=login">' . $this->html->csrfField()
             . '<label><span>Admin password</span><input type="password" name="password" autocomplete="current-password" autofocus></label>'
             . '<button>Log in</button></form>'
-            . '<p class="help">Forgot it? Remove <code>password_hash</code> from the <code>admin</code> section of config.php via FTP; this page then lets you set a new one using a setup key.</p>');
+            . '<p class="help"><a href="?p=reset">Forgot the password?</a> You can set a new one after proving you control the server\'s files.</p>');
     }
 
     // ------------------------------------------------------------------ admin

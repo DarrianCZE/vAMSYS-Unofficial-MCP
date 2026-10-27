@@ -38,8 +38,8 @@ Ordinary shared hosting with PHP-FPM is enough. No SSH, Composer, Node.js, Redis
 2. **Download** `vamsys-mcp-<version>.zip` from the [latest release](https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/releases/latest). Upload its contents with FTP to a folder **outside the web root**, e.g. `~/vamsys-mcp/`.
 3. **Point a (sub)domain at the `public/` folder**, e.g. document root `~/vamsys-mcp/public` for `mcp.your-va.com`. Only `public/` may be reachable from the web.
    - *If you can't choose the document root:* in your web root (e.g. `~/public_html/mcp/`), create `index.php` containing `<?php require '/home/you/vamsys-mcp/public/index.php';` and `setup.php` containing `<?php require '/home/you/vamsys-mcp/public/setup.php';`, and copy `public/.htaccess` there as well. Use one-line stubs rather than copies, so updates keep working.
-4. **Make `var/` writable by PHP.** Create the folder `~/vamsys-mcp/var/` if it doesn't exist. On most shared hosts it already is writable.
-5. **Open `https://mcp.your-va.com/setup.php`.** The installer first asks for a **setup key**. It has just written that key to `~/vamsys-mcp/var/setup-key.txt`: open the file with FTP or the file manager and paste its content. This proves you control the server, so nobody else can run your installer.
+4. **PHP must be able to create the folder `var/`** next to `public/`. It does this itself on most shared hosts. On some hosts the FTP account can't see folders PHP creates; that's fine.
+5. **Open `https://mcp.your-va.com/setup.php`.** To prove you control the server, the installer shows a file name such as `vamsys-setup-1a2b3c4d5e6f.txt`. Create an **empty file with that name** in the installation folder (the one with `public/`, `src/` and `vendor/`) using FTP or the file manager, then click **Continue**. Nobody without access to your files can get past this step.
 6. **Fill in the form:**
    - **Database:** host, name, user and password.
    - **DB admin login (optional):** only used once to create the tables, never stored. Leave it empty if your database user may create tables.
@@ -113,7 +113,7 @@ Other settings, all documented in the example file:
 - **Encryption:** `app_key`.
 - **Updates:** `update.repository`.
 
-**Forgot the admin password?** Delete the `password_hash` line in the `admin` section of config.php via FTP. The admin page then lets you set a new one after entering a fresh setup key.
+**Forgot the admin password?** Click **Forgot the password?** on the login page and prove you control the server the same way as during installation (create the empty file it names). Then set a new password.
 
 ## Database
 
@@ -188,7 +188,7 @@ All tools are marked read-only. Outputs are kept small on purpose, because every
 - **Secrets stay outside the web root.** Client secrets live only in `config/config.php` (or environment variables), outside the web root, `chmod 600`. They are never in the database, logs or error messages. The one exception is the optional FTP login for updates: it is stored encrypted in the database, and the key lives in config.php.
 - **The admin page is locked down:**
   - It only works over HTTPS.
-  - The installer and the password reset need a one-time setup key that is readable only through your server's files.
+  - The installer and the password reset require proof that you control the server's files: an empty file with a random, per-session name that you create over FTP.
   - Failed logins are throttled.
   - Every form is CSRF-protected and secrets are never shown again.
   - If you don't need it, disable it with `'admin' => ['web_enabled' => false]`.

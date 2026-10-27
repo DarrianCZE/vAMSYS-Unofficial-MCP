@@ -51,7 +51,7 @@ src/
   Http/BearerAuthMiddleware.php   v1 HTTP auth (static bearer token, hashed in config)
   Tools/                  one class per MCP tool (+ ToolResult for compact output)
   Exception/              VamsysMcpException and subclasses: messages are safe to show to clients
-  Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, SetupKey, Console
+  Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, OwnershipProof, Console
   Update/                 Updater (check/download/verify/stage), UpdateJob (resumable apply), ReleasePackage, ManagedFiles, Local/FtpFileWriter
   Admin/                  web admin (AdminApp controller, Session/CSRF, LoginThrottle, Html)
 tests/                    PHPUnit; SQLite DB, fake PSR-18 HTTP client, fake clock, temp dirs
@@ -96,7 +96,7 @@ HTTP transport: `Server::builder()->build()` serves both protocol eras. Clients 
   - CSP with a per-request nonce (no inline handlers).
   - Every dynamic value is escaped with `Html::e()`.
   - Failed logins are throttled.
-  - The installer and the password reset are gated by the one-time setup key in `var/setup-key.txt`.
+  - The installer and the password reset are gated by `OwnershipProof`: the operator creates `vamsys-setup-<code>.txt` in the installation folder over FTP. Do not rely on the operator reading files PHP created: on many shared hosts PHP runs as a different user, and the FTP account cannot see them.
   - Secrets are never echoed back into forms; an empty secret field means "keep the current one".
 
 ## Coding conventions
