@@ -90,7 +90,21 @@ final class UpdateTest extends TestCase
         $section = preg_quote('## [' . App::VERSION . ']', '/');
 
         self::assertMatchesRegularExpression("/^{$section} - \\d{4}-\\d{2}-\\d{2}\\R+### Breaking changes\\R/m", $changelog, 'CHANGELOG.md needs a section for App::VERSION that starts with "### Breaking changes"');
-        self::assertContains('CHANGELOG.md', ManagedFiles::FILES);
+    }
+
+    /**
+     * Installed versions extract a package with their own ManagedFiles and
+     * reject any file outside it, so a new top-level path in a release
+     * breaks every update from an older version (0.4.3 did this with
+     * CHANGELOG.md). New files must go into one of the existing directories.
+     */
+    public function testReleasesNeverAddTopLevelPaths(): void
+    {
+        self::assertSame(['src/', 'vendor/', 'bin/', 'public/', 'migrations/', 'docs/'], ManagedFiles::DIRECTORIES);
+        self::assertSame([
+            'config/config.example.php', 'composer.json', 'composer.lock', 'schema.sql',
+            'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 'release.json', 'manifest.json',
+        ], ManagedFiles::FILES);
     }
 
     public function testChangelogBetweenReturnsTheVersionsAnUpdateInstalls(): void

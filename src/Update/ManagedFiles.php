@@ -14,7 +14,7 @@ final class ManagedFiles
     public const array DIRECTORIES = ['src/', 'vendor/', 'bin/', 'public/', 'migrations/', 'docs/'];
     public const array FILES = [
         'config/config.example.php', 'composer.json', 'composer.lock', 'schema.sql',
-        'README.md', 'CHANGELOG.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 'release.json', 'manifest.json',
+        'README.md', 'AGENTS.md', 'CLAUDE.md', 'LICENSE', 'release.json', 'manifest.json',
     ];
 
     public static function isManaged(string $path): bool

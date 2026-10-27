@@ -129,7 +129,7 @@ Since 0.2.0 the HTTP endpoint is protected **only** by OAuth; there are no stati
 
 ## Installer, admin UI and updates (hard rules)
 
-- **Settings and credentials must survive updates.** The updater writes and deletes only files listed in `ManagedFiles` (src/, vendor/, bin/, public/, migrations/, docs/ and a few root files). It never touches `config/config.php`, `var/`, or anything else in the installation directory. If you add a new top-level path to releases, add it to `ManagedFiles`.
+- **Settings and credentials must survive updates.** The updater writes and deletes only files listed in `ManagedFiles` (src/, vendor/, bin/, public/, migrations/, docs/ and a few root files). It never touches `config/config.php`, `var/`, or anything else in the installation directory. **Never add a top-level path to `ManagedFiles`.** The installed (old) version extracts the package with its own `ManagedFiles` and rejects any file it doesn't know, so a new top-level path breaks every update from older versions; 0.4.3 broke this way with `CHANGELOG.md`. Put new release files in one of the existing directories. `UpdateTest::testReleasesNeverAddTopLevelPaths` pins the lists. `CHANGELOG.md` is deliberately not in releases: the updater reads it from GitHub.
 - **Minor and patch releases must update in place, without manual steps** (tool-interface breaks are covered in "Changelog and breaking changes" below):
   - New config keys must have defaults in `Config::fromArray()`, so an old config keeps working.
   - `ConfigFile`/`InstallService::buildConfig()` keep unknown keys.

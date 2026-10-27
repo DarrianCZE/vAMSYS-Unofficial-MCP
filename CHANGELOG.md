@@ -16,11 +16,21 @@ New tools, new optional arguments, new result fields and changed defaults are no
 
 ## [Unreleased]
 
-## [0.4.3] - 2026-10-27
+## [0.4.4] - 2026-10-27
 
 ### Breaking changes
 
 None.
+
+### Fixed
+
+- The updater can install this release again. The 0.4.3 package contained `CHANGELOG.md`, which older versions reject ("The release package contains an unexpected file 'CHANGELOG.md'"). Releases no longer include `CHANGELOG.md`; the updater reads it from GitHub. Update from 0.4.2 or older straight to 0.4.4.
+
+## [0.4.3] - 2026-10-27
+
+### Breaking changes
+
+None. Note: the updater can't install this release (it reports an unexpected file `CHANGELOG.md`). Install 0.4.4 instead.
 
 ### Added
 
@@ -126,7 +136,8 @@ None.
 
 First release: read-only MCP server with `list_airlines` and `find_routes`, web and CLI installer, and signed self-updates.
 
-[Unreleased]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/DarrianCZE/vAMSYS-Unofficial-MCP/compare/v0.4.0...v0.4.1
