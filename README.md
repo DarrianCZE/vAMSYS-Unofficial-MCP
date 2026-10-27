@@ -146,7 +146,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vamsys_mcp.* TO 'vamsys_mcp'@'localhost'
 | 0.2.0 | `0003_oauth.sql` | `mcp_user`, `mcp_oauth_client`, `mcp_oauth_code`, `mcp_oauth_token` (OAuth sign-in) |
 | 0.3.0 | `0004_caches.sql` | `airport_cache`, `route_cache` |
 
-The updater and Settings → Save (with a DB admin login) apply pending migrations automatically. To apply one by hand, run its file from `migrations/` as a DB admin, then record it so the installer knows it's done, e.g. `INSERT INTO schema_migration (version, applied_at) VALUES ('0004', UTC_TIMESTAMP());`. Every migration only adds tables (`IF NOT EXISTS`), so running one twice is harmless.
+The updater and Settings → Save (with a DB admin login) apply pending migrations automatically. To apply one by hand, run its file from `migrations/` as a DB admin, then record it so the installer knows it's done, e.g. `INSERT IGNORE INTO schema_migration (version, applied_at) VALUES ('0004', UTC_TIMESTAMP());`. Every migration only adds tables (`IF NOT EXISTS`) and the record uses `INSERT IGNORE`, so running either twice, or by hand and through the updater, is harmless.
 
 ## Connecting MCP clients
 
@@ -158,9 +158,11 @@ claude mcp add vamsys -- php /path/to/vamsys-mcp/bin/server-stdio.php
 claude mcp add vamsys -e VAMSYS_MCP_CONFIG=/path/to/config.php -- php /path/to/vamsys-mcp/bin/server-stdio.php
 ```
 
-### Claude Desktop (local, STDIO)
+### Claude Desktop
 
-In `claude_desktop_config.json`:
+Because the HTTP endpoint uses OAuth sign-in, the easiest way is to add it in the app's GUI as a **custom connector** (Customize → Connectors → **Add custom connector**). You don't need to edit a config file or install PHP locally. See [Remote over HTTP](#remote-over-http-with-oauth-sign-in-your-hosted-endpoint) below for the steps. The connector is tied to your Claude account, so it also shows up on claude.ai and Claude mobile.
+
+To run the server locally over STDIO instead, add it to `claude_desktop_config.json`:
 
 ```json
 {
@@ -224,6 +226,7 @@ If an airport ID can't be resolved, the output shows `dep_id`/`arr_id` with `dep
 - **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h). It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters are resolved from the same cache, so they cost no extra API calls.
 - **Routes:** `count_routes` (and `find_routes` with `refresh: true`) read the airline's **full route set** once and reuse it for `vamsys.route_cache_ttl` (default 10 min).
 - **Large route networks:** a full read stops at the per-airline request cap (it never waits and never goes over) or at `vamsys.scan_time_budget_seconds` (default 20 s, to stay below PHP's time limit). It then returns a partial result with `complete: false`, and the next call continues where it stopped.
+- **A resumed scan isn't a single snapshot.** Its pages can be read minutes apart, so routes changed in vAMSYS during that time (for example by a bulk import script) may be counted in their old or new state. Avoid counting while bulk route imports are running.
 
 All tools are marked read-only. Outputs are kept small on purpose, because every byte ends up in the AI's context.
 

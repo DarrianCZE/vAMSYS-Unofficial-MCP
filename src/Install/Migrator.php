@@ -76,7 +76,9 @@ final class Migrator
             foreach (self::statements((string) file_get_contents($files[$version])) as $statement) {
                 $ddl->exec($statement);
             }
-            $ddl->prepare('INSERT INTO schema_migration (version, applied_at) VALUES (:v, :t)')
+            // Tolerate a record added meanwhile (e.g. the operator ran the migration by hand).
+            $ignore = $ddl->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'sqlite' ? 'INSERT OR IGNORE' : 'INSERT IGNORE';
+            $ddl->prepare("{$ignore} INTO schema_migration (version, applied_at) VALUES (:v, :t)")
                 ->execute(['v' => $version, 't' => gmdate('Y-m-d H:i:s')]);
             $done[] = $version;
         }
