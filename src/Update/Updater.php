@@ -22,13 +22,25 @@ final class Updater
     }
 
     /**
-     * @return array{release: array<string, string>, update_available: bool}
+     * The latest release and, when it is newer, the CHANGELOG.md sections of
+     * every version between the installed one and it (null if the changelog
+     * could not be read; the release notes are the fallback then).
+     *
+     * @return array{release: array<string, string>, update_available: bool, changes: list<array{version: string, date: string, text: string, breaking: bool}>|null}
      */
     public function check(): array
     {
         $release = $this->releases->latest();
+        $available = version_compare($release['version'], $this->currentVersion, '>');
+        $changes = null;
+        if ($available) {
+            try {
+                $changes = Changelog::between($this->releases->changelog($release['version']), $this->currentVersion, $release['version']) ?: null;
+            } catch (UpdateException) {
+            }
+        }
 
-        return ['release' => $release, 'update_available' => version_compare($release['version'], $this->currentVersion, '>')];
+        return ['release' => $release, 'update_available' => $available, 'changes' => $changes];
     }
 
     /** Reason why this installation cannot be self-updated, or null. */

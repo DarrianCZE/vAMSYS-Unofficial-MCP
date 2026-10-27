@@ -8,11 +8,14 @@ It works for **any vAMSYS virtual airline**, and one install can serve several a
 
 **Version 1 is read-only.** It never creates, changes or deletes anything in vAMSYS.
 
+**What changed in each release, and every breaking change,** is listed in [CHANGELOG.md](CHANGELOG.md). Read it before you update.
+
 ## Contents
 
 - [Requirements](#requirements)
 - [Installation on shared hosting](#installation-on-shared-hosting)
 - [Updating](#updating)
+- [Changelog and breaking changes](CHANGELOG.md)
 - [Configuration](#configuration)
 - [Database](#database)
 - [Connecting MCP clients](#connecting-mcp-clients)
@@ -72,11 +75,13 @@ You can switch it off with `'admin' => ['web_enabled' => false]` in config.php.
 
 ## Updating
 
+**Before you update,** read the *Breaking changes* section of every version newer than yours in [CHANGELOG.md](CHANGELOG.md). It says what changes for you, for connected clients and for anything that calls the tools, and which manual steps are needed. **Check for updates** fetches it from GitHub and shows the entries of every version between yours and the latest, with breaking changes flagged, both in the admin page and in `php bin/update.php --check`.
+
 Open **Updates** in the admin page, click **Check for updates**, then **Install update**. Or, with SSH: `php bin/update.php`.
 
 What happens:
 1. The release zip is downloaded from GitHub and its **Ed25519 signature is verified**. Unsigned or tampered packages are refused.
-2. Compatibility is checked. Downgrades, new major versions (breaking changes) and releases that need a newer PHP are refused with an explanation.
+2. Compatibility is checked. Downgrades, new major versions (breaking changes; follow the manual steps in [CHANGELOG.md](CHANGELOG.md)) and releases that need a newer PHP are refused with an explanation.
 3. **Database changes:** if the release changes the database, you're asked for a DB admin login. It is used once and not stored. Database changes are always additive, so nothing is lost.
 4. **Backup:** every file that will be replaced or removed is copied to `var/update/backup-<old version>/`.
 5. **Maintenance and file replacement:** the MCP endpoint answers 503 for the duration. The work runs in short steps, so slow FTP doesn't hit PHP time limits.
@@ -146,6 +151,8 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vamsys_mcp.* TO 'vamsys_mcp'@'localhost'
 | 0.2.0 | `0003_oauth.sql` | `mcp_user`, `mcp_oauth_client`, `mcp_oauth_code`, `mcp_oauth_token` (OAuth sign-in) |
 | 0.3.0 | `0004_caches.sql` | `airport_cache`, `route_cache` |
 | 0.4.1 | `0005_route_scan.sql` | `route_scan` (cached route sets per filter; replaces `route_cache`, which is no longer used) |
+
+[CHANGELOG.md](CHANGELOG.md) also names the migrations of each release.
 
 The updater and Settings → Save (with a DB admin login) apply pending migrations automatically. To apply one by hand, run its file from `migrations/` as a DB admin, then record it so the installer knows it's done, e.g. `INSERT IGNORE INTO schema_migration (version, applied_at) VALUES ('0004', UTC_TIMESTAMP());`. Every migration only adds tables (`IF NOT EXISTS`) and the record uses `INSERT IGNORE`, so running either twice, or by hand and through the updater, is harmless.
 
@@ -240,6 +247,8 @@ If an airport ID can't be resolved, the output shows `dep_id`/`arr_id` with `dep
 
 All tools are marked read-only. Outputs are kept small on purpose, because every byte ends up in the AI's context.
 
+If scripts call the tools, or prompts rely on specific result fields, watch [CHANGELOG.md](CHANGELOG.md): renamed or removed tools, arguments and result fields are listed there under *Breaking changes*.
+
 ## Security notes
 
 - **The rate limit is shared.** vAMSYS allows 100 requests/minute **per airline**, shared by **every** OAuth client of that airline, including your other scripts, bots and integrations. The default cap here is 60/min, which leaves headroom for them. Lower `rate_cap` if your other tools are busy. When the cap is reached, the server waits briefly or returns a clear error. It never exceeds the cap.
@@ -285,12 +294,14 @@ One-time setup:
 Until a public key is committed, installations refuse automatic updates.
 
 Each release:
-1. Bump `App::VERSION` (and `App::UPDATE_FROM_MIN` if older versions can't update in place).
-2. Commit, then push a tag `vX.Y.Z`.
+1. In [CHANGELOG.md](CHANGELOG.md), rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD`, start a new empty `[Unreleased]` section and update the compare links at the bottom. Every version needs a `### Breaking changes` section, with `None.` when there are none.
+2. Bump `App::VERSION` (and `App::UPDATE_FROM_MIN` if older versions can't update in place).
+3. Commit, then push a tag `vX.Y.Z`.
 
 The workflow then:
 - runs the tests;
 - checks that the tag matches `App::VERSION`;
+- takes the release notes from that version's section of `CHANGELOG.md` (and fails if it's missing);
 - builds `vamsys-mcp-X.Y.Z.zip` with production `vendor/`, `release.json` and `manifest.json`;
 - signs it (`.zip.sig`);
 - publishes the GitHub release.

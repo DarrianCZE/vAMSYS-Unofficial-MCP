@@ -62,7 +62,14 @@ try {
         $io->line('Up to date.');
         exit(0);
     }
-    $io->line($check['release']['notes']);
+    if ($check['changes'] === null) {
+        $io->line($check['release']['notes']);
+    }
+    foreach ($check['changes'] ?? [] as $change) {
+        $io->line('');
+        $io->line("== {$change['version']}" . ($change['breaking'] ? '  ⚠ BREAKING CHANGES' : ''));
+        $io->line($change['text']);
+    }
     if (isset($options['check'])) {
         exit(0);
     }

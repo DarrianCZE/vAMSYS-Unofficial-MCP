@@ -50,11 +50,11 @@ final class ReleasePackage
             throw new UpdateException("Version {$version} is not newer than the installed {$currentVersion}.");
         }
         if (self::major($version) !== self::major($currentVersion) && self::major($currentVersion) >= 1) {
-            throw new UpdateException("Version {$version} is a new major version with breaking changes; follow the manual upgrade notes in the release.");
+            throw new UpdateException("Version {$version} is a new major version with breaking changes; follow the manual upgrade steps under \"Breaking changes\" in CHANGELOG.md.");
         }
         $min = (string) ($info['update_from_min'] ?? '0.0.0');
         if (version_compare($currentVersion, $min, '<')) {
-            throw new UpdateException("Version {$version} cannot be applied to {$currentVersion} automatically (needs at least {$min}); see the release notes.");
+            throw new UpdateException("Version {$version} cannot be applied to {$currentVersion} automatically (needs at least {$min}); see \"Breaking changes\" in CHANGELOG.md.");
         }
         $php = (string) ($info['requires_php'] ?? '8.4.0');
         if (version_compare(PHP_VERSION, $php, '<')) {

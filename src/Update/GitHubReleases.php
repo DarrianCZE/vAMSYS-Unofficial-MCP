@@ -52,6 +52,12 @@ final class GitHubReleases
         ];
     }
 
+    /** CHANGELOG.md as tagged for the given release. */
+    public function changelog(string $version): string
+    {
+        return $this->fetch("https://raw.githubusercontent.com/{$this->repository}/v{$version}/CHANGELOG.md", 'text/plain');
+    }
+
     public function download(string $url): string
     {
         if (!str_starts_with($url, 'https://github.com/')) {

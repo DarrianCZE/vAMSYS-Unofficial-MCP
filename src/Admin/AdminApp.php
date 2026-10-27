@@ -575,8 +575,11 @@ final class AdminApp
         $release = Session::get('release');
         $blocker = $updater->blocker();
 
+        $repository = (string) ($raw['update']['repository'] ?? InstallService::DEFAULT_REPOSITORY);
         $body = '<p>Installed version: <strong>' . Html::e(App::VERSION) . '</strong>. Updates come from GitHub releases of <code>'
-            . Html::e($raw['update']['repository'] ?? InstallService::DEFAULT_REPOSITORY) . '</code>, are signature-checked, and never touch config.php, var/ or your database data.</p>';
+            . Html::e($repository) . '</code>, are signature-checked, and never touch config.php, var/ or your database data. '
+            . 'Every change, including breaking changes, is listed in the <a href="'
+            . Html::e("https://github.com/{$repository}/blob/main/CHANGELOG.md") . '" target="_blank" rel="noopener">changelog</a>.</p>';
         if ($active) {
             $body .= '<div class="flash warn">An update to ' . Html::e($state['to_version']) . ' is in progress (' . Html::e($state['phase']) . ').</div>';
         } elseif ($blocker !== null) {
@@ -585,7 +588,7 @@ final class AdminApp
         $body .= '<form method="post" action="?a=update-check">' . $this->html->csrfField() . '<p><button class="secondary">Check for updates</button></p></form>';
 
         if (is_array($release) && !$active) {
-            $body .= '<h3>Latest release: ' . Html::e($release['version']) . '</h3><pre>' . Html::e($release['notes'] ?: '(no release notes)') . '</pre>';
+            $body .= '<h3>Latest release: ' . Html::e($release['version']) . '</h3>' . $this->releaseChanges($release, Session::get('changes'));
             if (!version_compare($release['version'], App::VERSION, '>')) {
                 $body .= '<p>You are up to date.</p>';
             } elseif ($blocker === null) {
@@ -597,6 +600,30 @@ final class AdminApp
         $canStart = !$active && $blocker === null && is_array($release) && version_compare($release['version'], App::VERSION, '>');
         $body .= $this->updateConsole($active, $canStart);
         $this->send(200, 'Updates', $body, $flashes);
+    }
+
+    /**
+     * The CHANGELOG.md sections of every version the update would install,
+     * with breaking changes called out; the release notes when the changelog
+     * could not be read.
+     *
+     * @param array<string, string> $release
+     */
+    private function releaseChanges(array $release, mixed $changes): string
+    {
+        if (!is_array($changes) || $changes === [] || !version_compare($release['version'], App::VERSION, '>')) {
+            return '<pre>' . Html::e($release['notes'] ?: '(no release notes)') . '</pre>';
+        }
+        $breaking = array_column(array_filter($changes, static fn (array $c): bool => $c['breaking']), 'version');
+        $html = $breaking === []
+            ? '<div class="flash ok">No breaking changes between ' . Html::e(App::VERSION) . ' and ' . Html::e($release['version']) . '.</div>'
+            : '<div class="flash warn">Breaking changes in ' . Html::e(implode(', ', $breaking)) . '. Read them below and follow their steps.</div>';
+        foreach ($changes as $c) {
+            $html .= '<h4>' . Html::e($c['version']) . ($c['date'] !== '' ? ' (' . Html::e($c['date']) . ')' : '')
+                . ($c['breaking'] ? ' – breaking changes' : '') . '</h4><pre>' . Html::e($c['text']) . '</pre>';
+        }
+
+        return $html;
     }
 
     private function updateConsole(bool $active, bool $canStart): string
@@ -682,6 +709,7 @@ final class AdminApp
     {
         $result = $this->updater($raw)->check();
         Session::set('release', $result['release']);
+        Session::set('changes', $result['changes']);
         $this->redirect('?p=update');
     }
 

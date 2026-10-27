@@ -9,6 +9,7 @@ A self-hosted **MCP server in PHP** that sits in front of the **vAMSYS Operation
 ## Ground rules
 
 - **Do not commit or push unless the user explicitly asks.**
+- **Every user-visible change goes into `CHANGELOG.md` under `[Unreleased]`**, in the same change as the code. It is the public record operators read before updating, and the source of the GitHub release notes. Every breaking change goes under `### Breaking changes` with the exact steps operators or tool users must take; see "Changelog and breaking changes" below.
 - **v1 is read-only.** No code path may send POST, PUT, PATCH or DELETE to the vAMSYS API. `VamsysClient` deliberately implements only `get()`; do not add a generic `request()` method or any write method. (The only POST this project sends is the OAuth token request to `/oauth/token`, which is not an API call.)
 - **The Pilots API is disabled by default.** Any path with a `pilots` or `pilot` segment (`/pilots…`, `/hubs/{id}/pilots`, `/ranks/{id}/pilots`, `/badges/{id}/pilots`, `/statistics/pilot/{id}`) must be unreachable unless the operator sets `'pilots_api' => true` for that airline. This is enforced in `VamsysClient::assertPathAllowed()`. Never loosen it and never default it to `true`.
 - **The source of truth for endpoints and fields is `docs/vamsys-openapi.json`** (OpenAPI 3.1). Read it before adding or changing a tool. Do not guess field names.
@@ -39,6 +40,7 @@ public/.htaccess          passes Authorization through Apache/FPM, routes to ind
 config/config.example.php documented config; real config/config.php is git-ignored
 migrations/NNNN_*.sql     database migrations (source of truth for the schema)
 schema.sql                all migrations concatenated, for manual setups (a test keeps it in sync)
+CHANGELOG.md              changes and breaking changes per release; release notes come from it (a test checks App::VERSION has a section)
 docs/vamsys-openapi.json  vAMSYS Operations API spec (source of truth)
 .github/workflows/release.yml   on tag vX.Y.Z: test, build zip with vendor/, sign, publish GitHub release
 src/
@@ -55,7 +57,7 @@ src/
   Cache/                  AirportCache (airport_cache), RouteCache + RouteSet (route_scan: cached, resumable scans per query), ScanLock, RouteRecord (projection), RouteFilter
   Exception/              VamsysMcpException and subclasses: messages are safe to show to clients
   Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, OwnershipProof, Console
-  Update/                 Updater (check/download/verify/stage), UpdateJob (resumable apply), ReleasePackage, ManagedFiles, Local/FtpFileWriter
+  Update/                 Updater (check/download/verify/stage), Changelog (CHANGELOG.md sections between two versions), UpdateJob (resumable apply), ReleasePackage, ManagedFiles, Local/FtpFileWriter
   Admin/                  web admin (AdminApp controller, Session/CSRF, LoginThrottle, Html)
 tests/                    PHPUnit; SQLite DB, fake PSR-18 HTTP client, fake clock, temp dirs
 ```
@@ -128,17 +130,17 @@ Since 0.2.0 the HTTP endpoint is protected **only** by OAuth; there are no stati
 ## Installer, admin UI and updates (hard rules)
 
 - **Settings and credentials must survive updates.** The updater writes and deletes only files listed in `ManagedFiles` (src/, vendor/, bin/, public/, migrations/, docs/ and a few root files). It never touches `config/config.php`, `var/`, or anything else in the installation directory. If you add a new top-level path to releases, add it to `ManagedFiles`.
-- **No breaking changes in minor/patch releases:**
+- **Minor and patch releases must update in place, without manual steps** (tool-interface breaks are covered in "Changelog and breaking changes" below):
   - New config keys must have defaults in `Config::fromArray()`, so an old config keeps working.
   - `ConfigFile`/`InstallService::buildConfig()` keep unknown keys.
   - Migrations must be **additive and idempotent** (`CREATE TABLE IF NOT EXISTS`, new nullable columns, no drops or renames), because they run *before* files are replaced and the old code must keep working on the new schema. Migrations are never rolled back.
   - Add every new migration to `schema.sql` too; `InstallTest` checks it.
-  - If an update cannot be applied in place, raise `App::UPDATE_FROM_MIN` or bump the major version. The updater then refuses and the release notes must explain the manual steps.
+  - If an update cannot be applied in place, raise `App::UPDATE_FROM_MIN` or bump the major version. The updater then refuses, and `CHANGELOG.md` must explain the manual steps under `### Breaking changes`.
 - **Self-update contract.** While `var/update/state.json` is in an active phase, `public/setup.php` and `bin/update.php --continue` run the *staged new* code from `var/update/staging`. The old version only downloads, verifies and extracts, then writes `{contract: 1, phase: "extracted", from_version, to_version, staging}`. Keep these keys and `UpdateJob::CONTRACT` stable, and keep `public/setup.php` self-contained (no project classes before the autoloader is chosen).
 - **Releases are signed.**
   - The updater installs only zips whose Ed25519 signature matches `ReleaseKey::PUBLIC_KEY`. Never add a way to skip that check.
   - The secret key exists only as the GitHub Actions secret `RELEASE_SIGNING_KEY`.
-  - Release flow: bump `App::VERSION`, commit, tag `vX.Y.Z`, push the tag.
+  - Release flow: in `CHANGELOG.md` rename `[Unreleased]` to `[X.Y.Z] - YYYY-MM-DD` and add a new empty `[Unreleased]`, bump `App::VERSION`, commit, tag `vX.Y.Z`, push the tag. The workflow fails if the changelog has no section for the tag.
 - **Web admin security:**
   - HTTPS only (localhost excepted).
   - CSRF token on every POST; `SameSite=Strict`, `HttpOnly` session cookie stored in `var/admin-sessions`.
@@ -147,6 +149,19 @@ Since 0.2.0 the HTTP endpoint is protected **only** by OAuth; there are no stati
   - Failed logins are throttled.
   - The installer and the password reset are gated by `OwnershipProof`: the operator creates `vamsys-setup-<code>.txt` in the installation folder over FTP. Do not rely on the operator reading files PHP created: on many shared hosts PHP runs as a different user, and the FTP account cannot see them.
   - Secrets are never echoed back into forms; an empty secret field means "keep the current one".
+
+## Changelog and breaking changes
+
+`CHANGELOG.md` ([Keep a Changelog](https://keepachangelog.com/en/1.1.0/)) is the public, permanent record of breaking changes. The updater (`Updater::check()`) fetches it from the new release's tag on raw.githubusercontent.com and parses it with `Update\Changelog`. The admin page and `bin/update.php` show every version between the installed one and the latest, and flag versions whose breaking changes aren't "None". Keep the format parseable: `## [X.Y.Z] - YYYY-MM-DD` headings, and `### Breaking changes` first in each section, starting with `None.` when there are none.
+
+- Every version section starts with `### Breaking changes`, containing `None.` when there are none, followed by `### Added` / `### Changed` / `### Removed` / `### Fixed` as needed. Mention migrations that need a DB admin login.
+- **What is breaking** (the full definition is at the top of `CHANGELOG.md`):
+  - **Operators:** a config key removed, renamed or with a new meaning; a manual step; a newer PHP/DB requirement; a removed CLI script; a raised `UPDATE_FROM_MIN`.
+  - **Connected clients:** anything that forces them to reconnect (MCP URL, OAuth flow).
+  - **Tool users:** a tool, argument or result field removed or renamed, an argument made required, or a changed meaning. Tool names, arguments and result fields are a public interface: scripts and prompts depend on them.
+- Prefer additive changes (new optional argument, new field alongside the old one) over breaking ones. When a break is unavoidable, write the entry for the reader: what changed, who is affected, and the exact steps to take.
+- Versioning: patch releases are never breaking. Below 1.0, breaking changes need at least a minor bump; from 1.0, a major bump.
+- Never rewrite the breaking-changes entries of a released version, except to correct them.
 
 ## Coding conventions
 

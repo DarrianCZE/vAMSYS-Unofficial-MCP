@@ -4,14 +4,23 @@ declare(strict_types=1);
 
 namespace VamsysMcp\Tests\Update;
 
+use Nyholm\Psr7\Factory\Psr17Factory;
+use Nyholm\Psr7\Response;
 use PHPUnit\Framework\TestCase;
+use Psr\Http\Message\RequestInterface;
+use Psr\Http\Message\ResponseInterface;
+use VamsysMcp\App;
 use VamsysMcp\Paths;
+use VamsysMcp\Tests\Support\FakeHttpClient;
 use VamsysMcp\Tests\Support\TempDir;
+use VamsysMcp\Update\Changelog;
+use VamsysMcp\Update\GitHubReleases;
 use VamsysMcp\Update\ManagedFiles;
 use VamsysMcp\Update\ReleasePackage;
 use VamsysMcp\Update\StepContext;
 use VamsysMcp\Update\UpdateException;
 use VamsysMcp\Update\UpdateJob;
+use VamsysMcp\Update\Updater;
 
 final class UpdateTest extends TestCase
 {
@@ -73,6 +82,58 @@ final class UpdateTest extends TestCase
     {
         ReleasePackage::assertCompatible(['version' => '1.3.0', 'update_from_min' => '1.0.0', 'requires_php' => '8.4.0'], '1.2.5', '1.3.0');
         $this->addToAssertionCount(1);
+    }
+
+    public function testChangelogListsBreakingChangesOfTheCurrentVersion(): void
+    {
+        $changelog = (string) file_get_contents(dirname(__DIR__, 2) . '/CHANGELOG.md');
+        $section = preg_quote('## [' . App::VERSION . ']', '/');
+
+        self::assertMatchesRegularExpression("/^{$section} - \\d{4}-\\d{2}-\\d{2}\\R+### Breaking changes\\R/m", $changelog, 'CHANGELOG.md needs a section for App::VERSION that starts with "### Breaking changes"');
+        self::assertContains('CHANGELOG.md', ManagedFiles::FILES);
+    }
+
+    public function testChangelogBetweenReturnsTheVersionsAnUpdateInstalls(): void
+    {
+        $changes = Changelog::between((string) file_get_contents(dirname(__DIR__, 2) . '/CHANGELOG.md'), '0.1.1', '0.4.2');
+
+        self::assertSame(['0.4.2', '0.4.1', '0.4.0', '0.3.0', '0.2.0'], array_column($changes, 'version'));
+        self::assertSame(['0.3.0', '0.2.0'], array_column(array_filter($changes, static fn (array $c): bool => $c['breaking']), 'version'));
+        self::assertStringStartsWith('### Breaking changes', $changes[0]['text']);
+        self::assertStringNotContainsString('Unreleased', implode("\n", array_column($changes, 'text')));
+    }
+
+    public function testCheckReadsTheChangelogOfTheLatestReleaseAndFallsBackToReleaseNotes(): void
+    {
+        $changelog = "# Changelog\n\n## [Unreleased]\n\n### Breaking changes\n\nNone.\n\n"
+            . "## [1.2.0] - 2026-11-02\n\n### Breaking changes\n\n- Renamed `a` to `b`.\n\n"
+            . "## [1.1.0] - 2026-11-01\n\n### Breaking changes\n\nNone.\n\n"
+            . "## [1.0.0] - 2026-10-30\n\n### Breaking changes\n\nNone.\n\n[1.2.0]: https://example.com\n";
+        $http = (new FakeHttpClient())->route(static fn (RequestInterface $r): ResponseInterface => match ((string) $r->getUri()) {
+            'https://api.github.com/repos/o/r/releases/latest' => FakeHttpClient::json(['tag_name' => 'v1.2.0', 'body' => 'notes', 'assets' => [
+                ['name' => 'vamsys-mcp-1.2.0.zip', 'browser_download_url' => 'https://github.com/z'],
+                ['name' => 'vamsys-mcp-1.2.0.zip.sig', 'browser_download_url' => 'https://github.com/s'],
+            ]]),
+            'https://raw.githubusercontent.com/o/r/v1.2.0/CHANGELOG.md' => new Response(200, [], $changelog),
+        });
+        $psr17 = new Psr17Factory();
+        $check = (new Updater(new Paths($this->dir), '1.0.0', new GitHubReleases($http, $psr17, 'o/r')))->check();
+
+        self::assertTrue($check['update_available']);
+        self::assertSame([
+            ['version' => '1.2.0', 'date' => '2026-11-02', 'text' => "### Breaking changes\n\n- Renamed `a` to `b`.", 'breaking' => true],
+            ['version' => '1.1.0', 'date' => '2026-11-01', 'text' => "### Breaking changes\n\nNone.", 'breaking' => false],
+        ], $check['changes']);
+
+        $http->route(static fn (RequestInterface $r): ResponseInterface => str_contains((string) $r->getUri(), 'raw.githubusercontent.com')
+            ? new Response(404)
+            : FakeHttpClient::json(['tag_name' => 'v1.2.0', 'body' => 'notes', 'assets' => [
+                ['name' => 'vamsys-mcp-1.2.0.zip', 'browser_download_url' => 'https://github.com/z'],
+                ['name' => 'vamsys-mcp-1.2.0.zip.sig', 'browser_download_url' => 'https://github.com/s'],
+            ]]));
+        $check = (new Updater(new Paths($this->dir), '1.0.0', new GitHubReleases($http, $psr17, 'o/r')))->check();
+        self::assertNull($check['changes']);
+        self::assertSame('notes', $check['release']['notes']);
     }
 
     public function testExtractRejectsPathsOutsideManagedFiles(): void
