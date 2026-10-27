@@ -25,6 +25,8 @@ final class TestDatabase
         $pdo->exec('CREATE TABLE mcp_oauth_client (client_id TEXT PRIMARY KEY, kind TEXT NOT NULL, client_name TEXT NOT NULL, redirect_uris TEXT NOT NULL, created_at TEXT NOT NULL, fetched_at TEXT)');
         $pdo->exec('CREATE TABLE mcp_oauth_code (code_hash TEXT PRIMARY KEY, client_id TEXT NOT NULL, user_id INTEGER NOT NULL, redirect_uri TEXT NOT NULL, code_challenge TEXT NOT NULL, resource TEXT NOT NULL, scope TEXT NOT NULL, grant_id TEXT NOT NULL, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0)');
         $pdo->exec('CREATE TABLE mcp_oauth_token (token_hash TEXT PRIMARY KEY, kind TEXT NOT NULL, grant_id TEXT NOT NULL, client_id TEXT NOT NULL, user_id INTEGER NOT NULL, resource TEXT NOT NULL, scope TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL, revoked INTEGER NOT NULL DEFAULT 0)');
+        $pdo->exec('CREATE TABLE airport_cache (airline TEXT NOT NULL, airport_id INTEGER NOT NULL, icao TEXT, iata TEXT, name TEXT NOT NULL, fetched_at TEXT NOT NULL, PRIMARY KEY (airline, airport_id))');
+        $pdo->exec('CREATE TABLE route_cache (airline TEXT PRIMARY KEY, started_at TEXT NOT NULL, fetched_at TEXT, complete INTEGER NOT NULL DEFAULT 0, next_cursor TEXT, route_count INTEGER NOT NULL DEFAULT 0, data TEXT NOT NULL)');
 
         return $pdo;
     }

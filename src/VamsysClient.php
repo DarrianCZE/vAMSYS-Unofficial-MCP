@@ -35,10 +35,11 @@ final class VamsysClient
 
     /**
      * @param array<string, scalar> $query
+     * @param int|null              $maxRateWait seconds to wait for the rate limiter; 0 = throw at once when the cap is reached
      *
      * @return array<mixed> decoded JSON body
      */
-    public function get(string $airlineKey, string $path, array $query = []): array
+    public function get(string $airlineKey, string $path, array $query = [], ?int $maxRateWait = null): array
     {
         $airline = $this->config->airline($airlineKey);
         $this->assertPathAllowed($airline, $path);
@@ -48,7 +49,7 @@ final class VamsysClient
 
         // One retry after a 401 with a fresh token (cached token revoked or expired early).
         for ($attempt = 0; ; ++$attempt) {
-            $this->rateLimiter->acquire($airline->key, $airline->rateCap);
+            $this->rateLimiter->acquire($airline->key, $airline->rateCap, $maxRateWait);
             $request = $this->requestFactory->createRequest('GET', $url)
                 ->withHeader('Authorization', 'Bearer ' . $this->tokens->getToken($airline))
                 ->withHeader('Accept', 'application/json');
@@ -68,6 +69,12 @@ final class VamsysClient
 
             return $this->decode($response, $path);
         }
+    }
+
+    /** page[size] used for paginated lists (config vamsys.page_size). */
+    public function pageSize(): int
+    {
+        return $this->config->pageSize;
     }
 
     /**

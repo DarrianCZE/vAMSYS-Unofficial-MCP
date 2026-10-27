@@ -40,10 +40,13 @@ final class RateLimiter
      * Take one request slot for the airline, waiting for the next window if
      * the cap is reached and the wait fits within maxWaitSeconds.
      *
+     * @param int|null $maxWaitSeconds overrides the configured wait; 0 = fail at once (used by long scans)
+     *
      * @throws RateLimitExceededException
      */
-    public function acquire(string $airline, int $cap): void
+    public function acquire(string $airline, int $cap, ?int $maxWaitSeconds = null): void
     {
+        $maxWait = $maxWaitSeconds ?? $this->maxWaitSeconds;
         $waited = 0.0;
         while (true) {
             $now = $this->clock->now();
@@ -56,7 +59,7 @@ final class RateLimiter
             $secondsLeft = max(0.0, $windowStart + self::WINDOW_SECONDS - ((float) $now->format('U.u')));
             // Sleep slightly past the boundary so the next attempt lands in the new window.
             $sleepFor = $secondsLeft + 0.05;
-            if ($waited + $sleepFor > $this->maxWaitSeconds) {
+            if ($waited + $sleepFor > $maxWait) {
                 throw new RateLimitExceededException(sprintf(
                     "Request cap of %d requests/minute for airline '%s' reached (the vAMSYS limit is shared with "
                     . 'all other OAuth clients of this airline). Try again in about %d seconds.',

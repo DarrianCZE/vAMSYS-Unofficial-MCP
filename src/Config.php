@@ -38,7 +38,14 @@ final class Config
         public readonly array $oauthRedirectHosts = RedirectPolicy::DEFAULT_HOSTS,
         public readonly int $oauthAccessTokenTtl = 3600,
         public readonly int $oauthRefreshTokenTtl = 30 * 86400,
+        public readonly int $airportCacheTtl = 86400,
+        public readonly int $routeCacheTtl = 600,
+        public readonly int $scanMaxPages = 100,
+        public readonly int $scanTimeBudgetSeconds = 20,
     ) {
+        if ($airportCacheTtl < 60 || $routeCacheTtl < 0 || $scanMaxPages < 1 || $scanTimeBudgetSeconds < 1) {
+            throw new ConfigException('vamsys.airport_cache_ttl must be >= 60, route_cache_ttl >= 0, scan_max_pages and scan_time_budget_seconds >= 1.');
+        }
         if ($airlines === []) {
             throw new ConfigException('No airlines configured.');
         }
@@ -96,6 +103,10 @@ final class Config
             oauthRedirectHosts: array_values(array_map('strval', (array) ($oauth['allowed_redirect_hosts'] ?? RedirectPolicy::DEFAULT_HOSTS))),
             oauthAccessTokenTtl: (int) ($oauth['access_token_ttl'] ?? 3600),
             oauthRefreshTokenTtl: (int) ($oauth['refresh_token_ttl'] ?? 30 * 86400),
+            airportCacheTtl: (int) ($vamsys['airport_cache_ttl'] ?? 86400),
+            routeCacheTtl: (int) ($vamsys['route_cache_ttl'] ?? 600),
+            scanMaxPages: (int) ($vamsys['scan_max_pages'] ?? 100),
+            scanTimeBudgetSeconds: (int) ($vamsys['scan_time_budget_seconds'] ?? 20),
         );
     }
 

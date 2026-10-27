@@ -125,6 +125,7 @@ What's stored where:
 |---|---|
 | Cached vAMSYS access tokens, rate-limit counters, login-throttle counters, optional audit log | Database |
 | MCP users (password hashes), OAuth clients, codes and tokens (SHA-256 hashes only) | Database |
+| Caches of vAMSYS data: `airport_cache` (airport ID → ICAO/IATA/name) and `route_cache` (a compact copy of each airline's route list; internal remarks are never stored) | Database |
 | FTP login for updates | Database, **encrypted**. The key (`app_key`) is in config.php, so neither a DB dump nor config.php alone reveals it. |
 | vAMSYS client secrets, DB password, admin password hash | config.php only. Never in the database. |
 
@@ -136,6 +137,16 @@ CREATE USER 'vamsys_mcp'@'localhost' IDENTIFIED BY 'a-long-random-password';
 GRANT SELECT, INSERT, UPDATE, DELETE ON vamsys_mcp.* TO 'vamsys_mcp'@'localhost';
 -- then import schema.sql into vamsys_mcp
 ```
+
+### Migration notes
+
+| Version | Migration | What it adds |
+|---|---|---|
+| 0.1.0 | `0001_initial.sql`, `0002_admin.sql` | vAMSYS token cache, rate-limit windows, call log, encrypted settings, admin login throttle |
+| 0.2.0 | `0003_oauth.sql` | `mcp_user`, `mcp_oauth_client`, `mcp_oauth_code`, `mcp_oauth_token` (OAuth sign-in) |
+| 0.3.0 | `0004_caches.sql` | `airport_cache`, `route_cache` |
+
+The updater and Settings → Save (with a DB admin login) apply pending migrations automatically. To apply one by hand, run its file from `migrations/` as a DB admin, then record it so the installer knows it's done, e.g. `INSERT INTO schema_migration (version, applied_at) VALUES ('0004', UTC_TIMESTAMP());`. Every migration only adds tables (`IF NOT EXISTS`), so running one twice is harmless.
 
 ## Connecting MCP clients
 
@@ -187,7 +198,32 @@ Other clients only work if their redirect host is allowed in `oauth.allowed_redi
 | Tool | What it does |
 |---|---|
 | `list_airlines` | Lists the configured airline keys (plus name and weight unit). Call this first. |
-| `find_routes` | Finds routes and returns a **compact summary**, never the whole route set. Arguments: `airline` (required), `dep` / `arr` (ICAO or IATA code), `tag` (case-sensitive; comma-separated = must have all), `missing_field` (e.g. `departure_time`, `flight_distance`, `remarks`, `fleet_ids`), `limit` (1–50, default 20). The answer includes `has_more`, and a note if it stopped at the page limit. |
+| `find_routes` | Finds routes and returns **compact summaries**, never the whole route set. Departure and arrival come back as ICAO codes (`dep`/`arr`, plus `dep_iata`/`arr_iata`). |
+| `count_routes` | Counts routes matching the same filters without listing them, for questions like "how many routes are missing a departure time?". Optional `breakdown`: `tag` (top 15 tags) or `visibility` (hidden vs visible). |
+
+**Common arguments** (`find_routes` and `count_routes`):
+- `airline` (required)
+- `dep` / `arr`: ICAO or IATA code
+- `tag`: case-sensitive; comma-separated means the route must have all of them
+- `missing_field`: the field is empty, e.g. `departure_time`, `flight_distance`, `remarks`, `fleet_ids`
+- `refresh`: re-read the routes from vAMSYS instead of using the cache
+- `limit` (`find_routes` only): 1–50, default 20
+
+**What the result fields mean:**
+
+| Field | Meaning |
+|---|---|
+| `complete` | `true` when every relevant route was examined. Then `matched` is exact. |
+| `scanned` | How many routes were examined. |
+| `total_routes` | Size of the airline's whole route set. Only present when the full set was read. |
+| `source` | Where the routes came from: `cache` (a recently read full set), `scan` (the full set read now) or `live` (a `find_routes` search that pages through vAMSYS and stops as soon as it has `limit` matches). |
+
+If an airport ID can't be resolved, the output shows `dep_id`/`arr_id` with `dep_unresolved`/`arr_unresolved: true`.
+
+**Caching:**
+- **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h). It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters are resolved from the same cache, so they cost no extra API calls.
+- **Routes:** `count_routes` (and `find_routes` with `refresh: true`) read the airline's **full route set** once and reuse it for `vamsys.route_cache_ttl` (default 10 min).
+- **Large route networks:** a full read stops at the per-airline request cap (it never waits and never goes over) or at `vamsys.scan_time_budget_seconds` (default 20 s, to stay below PHP's time limit). It then returns a partial result with `complete: false`, and the next call continues where it stopped.
 
 All tools are marked read-only. Outputs are kept small on purpose, because every byte ends up in the AI's context.
 

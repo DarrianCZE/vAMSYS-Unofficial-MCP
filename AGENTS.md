@@ -51,7 +51,8 @@ src/
   OAuth/                  built-in OAuth 2.1 authorization server: OAuthService (codes, tokens, PKCE, rotation),
                           ClientRegistry (DCR + Client ID Metadata Documents), ClientMetadataFetcher (SSRF-safe),
                           RedirectPolicy, McpUsers, TokenValidator (plugs into the SDK's AuthorizationMiddleware), OAuthApp (HTTP)
-  Tools/                  one class per MCP tool (+ ToolResult for compact output)
+  Tools/                  one class per MCP tool (list_airlines, find_routes, count_routes) + RouteQuery (filters, summaries) + ToolResult
+  Cache/                  AirportCache (airport_cache), RouteCache + RouteSet (route_cache, resumable scans), RouteRecord (projection), RouteFilter
   Exception/              VamsysMcpException and subclasses: messages are safe to show to clients
   Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, OwnershipProof, Console
   Update/                 Updater (check/download/verify/stage), UpdateJob (resumable apply), ReleasePackage, ManagedFiles, Local/FtpFileWriter
@@ -68,6 +69,23 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 - Design tools around **questions people ask**, not a 1:1 mirror of endpoints.
 - **Keep outputs small**: compact JSON (`ToolResult::of()`), only the fields needed, empty fields dropped, a `limit` with `has_more`, never full collections.
 - Filter server-side where vAMSYS supports it (`filter[...]`), otherwise while paging, and stop paging once the answer is known.
+- Show airports as ICAO codes, not vAMSYS IDs. Resolve them with `AirportCache` (and airport filter inputs too), never with one `/airports` call per code.
+- Be honest about coverage. Every route result reports:
+  - `complete`: every relevant route was examined;
+  - `scanned`: how many routes were examined;
+  - `total_routes`: only when the full set is known;
+  - `matched`: only when `complete`.
+  Never present a partial scan as a full answer, and describe these fields in the tool description.
+
+## Caching rules (hard rules)
+
+- **Every cache fill goes through `VamsysClient`,** and so through the per-airline rate limiter. Counts and full scans included. There is no side channel to vAMSYS.
+- **Full scans** (`RouteCache::get`) call `get(..., maxRateWait: 0)`. At the cap they stop at once and return a partial `RouteSet` (`complete: false`, `stopReason`); they never wait and never exceed the cap. They also stop at `scan_time_budget_seconds`, so PHP's `max_execution_time` is never hit.
+- **Progress is saved** (routes so far + cursor) and the next call resumes within `route_cache_ttl`. Never discard progress just because a call was cut short.
+- **A partial route set is never served as complete,** and never cached as complete.
+- **`airport_cache`** is reloaded when it's older than `airport_cache_ttl`, or on a miss at most once per request. A miss reload only happens if the last load was more than 5 minutes ago. A reload cut short keeps its rows; stale rows are deleted only after a complete reload.
+- **No surrounding transactions.** Don't wrap API-calling code in a DB transaction: the rate limiter opens its own transaction per request, and PDO can't nest them.
+- **The route cache stores only `RouteRecord::project()` output.** Never internal remarks, SimBrief options or other bulk fields.
 - Annotate every v1 tool with `readOnlyHint: true`.
 - Errors the user/LLM should see: throw `Mcp\Exception\ToolCallException` (its message reaches the client). Convert `VamsysMcpException` to `ToolCallException` in the tool. Any other exception becomes a generic error.
 
@@ -76,7 +94,7 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 - vAMSYS client secrets, the DB password, the admin password hash, HTTP token hashes and `app_key` live **only** in `config/config.php` (outside the web root, `chmod 600`, git-ignored) or in environment variables it reads. Never in plaintext in the database, never in the repo.
 - The only secret in the database is the updater's FTP login, stored **encrypted** (libsodium secretbox, `EncryptedSettings`) with `app_key` from config.php. Key and ciphertext are deliberately split across file and DB. Do not add other secrets to the DB without the same scheme.
 - The DB admin login used for migrations is asked for when needed and **never stored**.
-- The DB otherwise stores only cached access tokens, rate-window rows, login-throttle rows and the optional call log.
+- The DB otherwise stores only cached access tokens, rate-window rows, login-throttle rows, the optional call log, and the non-secret data caches `airport_cache` and `route_cache`.
 - Never put tokens, secrets, request headers, token-response bodies or DSNs into exception messages, logs, or tool output. `CallLog` records the path only (no query string). `public/index.php` logs only the exception class.
 - MCP users' passwords are stored with `password_hash()`. OAuth codes, access and refresh tokens are random 256-bit strings stored only as SHA-256 hashes.
 

@@ -11,8 +11,12 @@ use Mcp\Server\Builder;
 use Nyholm\Psr7\Factory\Psr17Factory;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Component\HttpClient\Psr18Client;
+use VamsysMcp\Cache\AirportCache;
+use VamsysMcp\Cache\RouteCache;
+use VamsysMcp\Tools\CountRoutesTool;
 use VamsysMcp\Tools\FindRoutesTool;
 use VamsysMcp\Tools\ListAirlinesTool;
+use VamsysMcp\Tools\RouteQuery;
 
 /**
  * Wires config, database, vAMSYS client and tools into an MCP server builder.
@@ -21,7 +25,7 @@ use VamsysMcp\Tools\ListAirlinesTool;
 final class App
 {
     public const string NAME = 'vamsys-unofficial-mcp';
-    public const string VERSION = '0.2.0';
+    public const string VERSION = '0.3.0';
     /** Oldest installed version that may auto-update to this one (raise it when an update cannot be applied in place). */
     public const string UPDATE_FROM_MIN = '0.1.0';
     public const string REQUIRES_PHP = '8.4.0';
@@ -76,9 +80,15 @@ final class App
 
     public function serverBuilder(): Builder
     {
+        $clock = new SystemClock();
+        $c = $this->config;
+        $routes = new RouteCache($this->pdo, $this->client, $clock, $c->routeCacheTtl, $c->scanMaxPages, (float) $c->scanTimeBudgetSeconds);
+        $query = new RouteQuery(new AirportCache($this->pdo, $this->client, $clock, $c->airportCacheTtl, $c->scanMaxPages));
+
         $container = new Container();
-        $container->set(ListAirlinesTool::class, new ListAirlinesTool($this->config));
-        $container->set(FindRoutesTool::class, new FindRoutesTool($this->client));
+        $container->set(ListAirlinesTool::class, new ListAirlinesTool($c));
+        $container->set(FindRoutesTool::class, new FindRoutesTool($this->client, $routes, $query, $c->maxPagesPerCall, $c->routeCacheTtl));
+        $container->set(CountRoutesTool::class, new CountRoutesTool($routes, $query, $c->routeCacheTtl));
 
         $readOnly = static fn (string $title): ToolAnnotations => new ToolAnnotations(
             title: $title,
@@ -93,6 +103,7 @@ final class App
             ->setInstructions('Read-only access to vAMSYS virtual airline data. Call list_airlines first to get airline keys.')
             ->setContainer($container)
             ->addTool(ListAirlinesTool::class, ListAirlinesTool::NAME, description: ListAirlinesTool::DESCRIPTION, annotations: $readOnly('List airlines'))
-            ->addTool(FindRoutesTool::class, FindRoutesTool::NAME, description: FindRoutesTool::DESCRIPTION, annotations: $readOnly('Find routes'));
+            ->addTool(FindRoutesTool::class, FindRoutesTool::NAME, description: FindRoutesTool::DESCRIPTION, annotations: $readOnly('Find routes'))
+            ->addTool(CountRoutesTool::class, CountRoutesTool::NAME, description: CountRoutesTool::DESCRIPTION, annotations: $readOnly('Count routes'));
     }
 }
