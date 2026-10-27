@@ -41,7 +41,7 @@ final class Config
         public readonly int $airportCacheTtl = 86400,
         public readonly int $routeCacheTtl = 600,
         public readonly int $scanMaxPages = 100,
-        public readonly int $scanTimeBudgetSeconds = 20,
+        public readonly int $scanTimeBudgetSeconds = 15,
     ) {
         if ($airportCacheTtl < 60 || $routeCacheTtl < 0 || $scanMaxPages < 1 || $scanTimeBudgetSeconds < 1) {
             throw new ConfigException('vamsys.airport_cache_ttl must be >= 60, route_cache_ttl >= 0, scan_max_pages and scan_time_budget_seconds >= 1.');
@@ -106,7 +106,7 @@ final class Config
             airportCacheTtl: (int) ($vamsys['airport_cache_ttl'] ?? 86400),
             routeCacheTtl: (int) ($vamsys['route_cache_ttl'] ?? 600),
             scanMaxPages: (int) ($vamsys['scan_max_pages'] ?? 100),
-            scanTimeBudgetSeconds: (int) ($vamsys['scan_time_budget_seconds'] ?? 20),
+            scanTimeBudgetSeconds: (int) ($vamsys['scan_time_budget_seconds'] ?? 15),
         );
     }
 
@@ -135,6 +135,22 @@ final class Config
     public function resourceUrls(): array
     {
         return [$this->baseUrl() . '/mcp', $this->baseUrl()];
+    }
+
+    /**
+     * The airline key a tool should use: the given one, or the only configured
+     * airline when none is given.
+     */
+    public function airlineKey(?string $key): string
+    {
+        if ($key !== null && trim($key) !== '') {
+            return $this->airline(trim($key))->key;
+        }
+        if (count($this->airlines) === 1) {
+            return (string) array_key_first($this->airlines);
+        }
+
+        throw new UnknownAirlineException('Several airlines are configured, so the airline argument is required: ' . implode(', ', array_keys($this->airlines)) . '.');
     }
 
     public function airline(string $key): AirlineConfig

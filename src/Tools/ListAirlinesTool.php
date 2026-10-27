@@ -10,7 +10,7 @@ use VamsysMcp\Config;
 final class ListAirlinesTool
 {
     public const string NAME = 'list_airlines';
-    public const string DESCRIPTION = 'List the vAMSYS airlines this server is configured for. Use the returned "key" as the airline argument of every other tool.';
+    public const string DESCRIPTION = 'List the vAMSYS airlines this server is configured for. Use the returned "key" as the airline argument of every other tool; with only one airline configured that argument may be omitted.';
 
     public function __construct(private readonly Config $config)
     {

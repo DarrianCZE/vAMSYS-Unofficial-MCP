@@ -51,8 +51,8 @@ src/
   OAuth/                  built-in OAuth 2.1 authorization server: OAuthService (codes, tokens, PKCE, rotation),
                           ClientRegistry (DCR + Client ID Metadata Documents), ClientMetadataFetcher (SSRF-safe),
                           RedirectPolicy, McpUsers, TokenValidator (plugs into the SDK's AuthorizationMiddleware), OAuthApp (HTTP)
-  Tools/                  one class per MCP tool (list_airlines, find_routes, count_routes) + RouteQuery (filters, summaries) + ToolResult
-  Cache/                  AirportCache (airport_cache), RouteCache + RouteSet (route_cache, resumable scans), RouteRecord (projection), RouteFilter
+  Tools/                  one class per MCP tool (list_airlines, find_routes, count_routes, get_route, find_duplicates) + RouteQuery (airline, filters, summaries) + ToolResult
+  Cache/                  AirportCache (airport_cache), RouteCache + RouteSet (route_scan: cached, resumable scans per query), ScanLock, RouteRecord (projection), RouteFilter
   Exception/              VamsysMcpException and subclasses: messages are safe to show to clients
   Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, OwnershipProof, Console
   Update/                 Updater (check/download/verify/stage), UpdateJob (resumable apply), ReleasePackage, ManagedFiles, Local/FtpFileWriter
@@ -68,7 +68,9 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 
 - Design tools around **questions people ask**, not a 1:1 mirror of endpoints.
 - **Keep outputs small**: compact JSON (`ToolResult::of()`), only the fields needed, empty fields dropped, a `limit` with `has_more`, never full collections.
-- Filter server-side where vAMSYS supports it (`filter[...]`), otherwise while paging, and stop paging once the answer is known. Never read an airline's full route set for a question an airport filter can narrow (`RouteFilter::isNarrow()` → `RouteCache::matching()`), unless a fresh cached full set answers it for free.
+- Filter server-side where vAMSYS supports it (`filter[...]`), otherwise while paging, and stop paging once the answer is known. Every filter vAMSYS supports goes into `RouteFilter::serverQueries()`; `RouteCache::forFilter()` reads only those sets and reads the full route set only when there is none (`missing_field`, no filter), unless a fresh cached full set answers it for free. `RouteFilter::matches()` always re-checks locally, so a looser server filter can't change an answer.
+- vAMSYS never reports totals: counting always means reading the matching routes. Tool descriptions and `App::INSTRUCTIONS` state this cost model; keep them accurate.
+- `airline` is optional in tools when exactly one airline is configured (`RouteQuery::airline()` → `Config::airlineKey()`).
 - Show airports as ICAO codes, not vAMSYS IDs. Resolve them with `AirportCache`, never with one `/airports` call per route in the output. Airport filter inputs come from the fresh cache, otherwise from one `filter[icao]`/`filter[iata]` request per code (`AirportCache::findByCode`). A filter input never triggers a reload of the whole airport list.
 - Be honest about coverage. Every route result reports:
   - `complete`: every relevant route was examined;
@@ -80,8 +82,9 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 ## Caching rules (hard rules)
 
 - **Every cache fill goes through `VamsysClient`,** and so through the per-airline rate limiter. Counts and full scans included. There is no side channel to vAMSYS.
-- **Full scans** (`RouteCache::get`) and filtered scans (`RouteCache::matching`) call `get(..., maxRateWait: 0)`. At the cap they stop at once and return a partial `RouteSet` (`complete: false`, `stopReason`, `retryAfterSeconds`); they never wait and never exceed the cap. They also stop at `scan_time_budget_seconds`, so PHP's `max_execution_time` is never hit. Tools report a paused scan's `retry_after_seconds`.
-- **Filtered scans are not cached and not resumable;** their `RouteSet` has `filtered: true`, and tools never report `total_routes` for it.
+- **Scans** (`RouteCache::scan`, full set or one filtered query, stored in `route_scan` keyed by airline + query) call `get(..., maxRateWait: 0)`. At the cap they stop at once and return a partial `RouteSet` (`complete: false`, `stopReason`, `retryAfterSeconds`); they never wait and never exceed the cap. They stop before a page that would probably end after `scan_time_budget_seconds` (slowest page so far), so a call stays below MCP clients' ~25–30 s timeout and PHP's `max_execution_time`. Lock waits count against the same budget. Tools report `resumable`, `retry_after_seconds` and `progress` for a paused scan.
+- **One scan per set at a time:** `ScanLock` (MariaDB `GET_LOCK`, per airline + query). A call that can't get the lock in time reports the other call's progress (`stopReason: busy`); one that gets it reloads the row first and continues the saved scan.
+- **The last complete set keeps serving** (`data`, `fetched_at`) while a newer scan runs in `scan_*`; it is replaced only when that scan completes. `refresh=true` ignores the complete set but still continues an unfinished scan, so repeating a call always makes progress. Tools never report `total_routes` for a filtered set (`filtered: true`).
 - **Progress is saved** (routes so far + cursor) and the next call resumes within `route_cache_ttl`. Never discard progress just because a call was cut short.
 - **A partial route set is never served as complete,** and never cached as complete.
 - **`airport_cache`** is reloaded when it's older than `airport_cache_ttl`, or on an ID miss at most once per request. A miss reload only happens if the last load was more than 5 minutes ago. Single-code lookups (`findByCode`) are never written to the cache, because its freshness is judged by full reloads only. A reload cut short keeps its rows; stale rows are deleted only after a complete reload.
@@ -95,7 +98,7 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 - vAMSYS client secrets, the DB password, the admin password hash, HTTP token hashes and `app_key` live **only** in `config/config.php` (outside the web root, `chmod 600`, git-ignored) or in environment variables it reads. Never in plaintext in the database, never in the repo.
 - The only secret in the database is the updater's FTP login, stored **encrypted** (libsodium secretbox, `EncryptedSettings`) with `app_key` from config.php. Key and ciphertext are deliberately split across file and DB. Do not add other secrets to the DB without the same scheme.
 - The DB admin login used for migrations is asked for when needed and **never stored**.
-- The DB otherwise stores only cached access tokens, rate-window rows, login-throttle rows, the optional call log, and the non-secret data caches `airport_cache` and `route_cache`.
+- The DB otherwise stores only cached access tokens, rate-window rows, login-throttle rows, the optional call log, and the non-secret data caches `airport_cache` and `route_scan` (`route_cache` from 0.3.0/0.4.0 is no longer used).
 - Never put tokens, secrets, request headers, token-response bodies or DSNs into exception messages, logs, or tool output. `CallLog` records the path only (no query string). `public/index.php` logs only the exception class.
 - MCP users' passwords are stored with `password_hash()`. OAuth codes, access and refresh tokens are random 256-bit strings stored only as SHA-256 hashes.
 

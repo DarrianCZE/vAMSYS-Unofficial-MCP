@@ -14,7 +14,9 @@ use Symfony\Component\HttpClient\Psr18Client;
 use VamsysMcp\Cache\AirportCache;
 use VamsysMcp\Cache\RouteCache;
 use VamsysMcp\Tools\CountRoutesTool;
+use VamsysMcp\Tools\FindDuplicatesTool;
 use VamsysMcp\Tools\FindRoutesTool;
+use VamsysMcp\Tools\GetRouteTool;
 use VamsysMcp\Tools\ListAirlinesTool;
 use VamsysMcp\Tools\RouteQuery;
 
@@ -25,10 +27,17 @@ use VamsysMcp\Tools\RouteQuery;
 final class App
 {
     public const string NAME = 'vamsys-unofficial-mcp';
-    public const string VERSION = '0.4.0';
+    public const string VERSION = '0.4.1';
     /** Oldest installed version that may auto-update to this one (raise it when an update cannot be applied in place). */
     public const string UPDATE_FROM_MIN = '0.1.0';
     public const string REQUIRES_PHP = '8.4.0';
+    /** MCP server instructions: what the tools cost, so clients pick cheap calls. */
+    public const string INSTRUCTIONS = 'Read-only access to vAMSYS virtual airline data. The airline argument may be omitted when only one airline is configured '
+        . '(list_airlines shows the keys). Cost model: vAMSYS allows a limited number of requests per minute per airline and never reports totals, '
+        . 'so counting means reading routes. Filters by airport (dep/arr), flight_number or callsign are fast (usually one request). '
+        . 'Questions vAMSYS cannot filter (missing_field, or no filter) read the airline\'s whole route set: for large airlines that can take 2 or more calls '
+        . '(complete=false; call again with the same arguments after retry_after_seconds). Route sets read recently are reused for a few minutes, '
+        . 'so follow-up questions are free. Do not run several scans for one airline in parallel; they share one request budget.';
 
     private function __construct(
         public readonly Config $config,
@@ -83,12 +92,14 @@ final class App
         $clock = new SystemClock();
         $c = $this->config;
         $routes = new RouteCache($this->pdo, $this->client, $clock, $c->routeCacheTtl, $c->scanMaxPages, (float) $c->scanTimeBudgetSeconds);
-        $query = new RouteQuery(new AirportCache($this->pdo, $this->client, $clock, $c->airportCacheTtl, $c->scanMaxPages));
+        $query = new RouteQuery(new AirportCache($this->pdo, $this->client, $clock, $c->airportCacheTtl, $c->scanMaxPages), $c);
 
         $container = new Container();
         $container->set(ListAirlinesTool::class, new ListAirlinesTool($c));
-        $container->set(FindRoutesTool::class, new FindRoutesTool($this->client, $routes, $query, $c->maxPagesPerCall, $c->routeCacheTtl));
-        $container->set(CountRoutesTool::class, new CountRoutesTool($routes, $query, $c->routeCacheTtl));
+        $container->set(FindRoutesTool::class, new FindRoutesTool($this->client, $routes, $query, $c->maxPagesPerCall));
+        $container->set(CountRoutesTool::class, new CountRoutesTool($routes, $query));
+        $container->set(GetRouteTool::class, new GetRouteTool($this->client, $query));
+        $container->set(FindDuplicatesTool::class, new FindDuplicatesTool($routes, $query));
 
         $readOnly = static fn (string $title): ToolAnnotations => new ToolAnnotations(
             title: $title,
@@ -100,10 +111,12 @@ final class App
 
         return Server::builder()
             ->setServerInfo(self::NAME, self::VERSION)
-            ->setInstructions('Read-only access to vAMSYS virtual airline data. Call list_airlines first to get airline keys.')
+            ->setInstructions(self::INSTRUCTIONS)
             ->setContainer($container)
             ->addTool(ListAirlinesTool::class, ListAirlinesTool::NAME, description: ListAirlinesTool::DESCRIPTION, annotations: $readOnly('List airlines'))
             ->addTool(FindRoutesTool::class, FindRoutesTool::NAME, description: FindRoutesTool::DESCRIPTION, annotations: $readOnly('Find routes'))
-            ->addTool(CountRoutesTool::class, CountRoutesTool::NAME, description: CountRoutesTool::DESCRIPTION, annotations: $readOnly('Count routes'));
+            ->addTool(CountRoutesTool::class, CountRoutesTool::NAME, description: CountRoutesTool::DESCRIPTION, annotations: $readOnly('Count routes'))
+            ->addTool(GetRouteTool::class, GetRouteTool::NAME, description: GetRouteTool::DESCRIPTION, annotations: $readOnly('Get route'))
+            ->addTool(FindDuplicatesTool::class, FindDuplicatesTool::NAME, description: FindDuplicatesTool::DESCRIPTION, annotations: $readOnly('Find duplicate routes'));
     }
 }

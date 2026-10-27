@@ -145,6 +145,7 @@ GRANT SELECT, INSERT, UPDATE, DELETE ON vamsys_mcp.* TO 'vamsys_mcp'@'localhost'
 | 0.1.0 | `0001_initial.sql`, `0002_admin.sql` | vAMSYS token cache, rate-limit windows, call log, encrypted settings, admin login throttle |
 | 0.2.0 | `0003_oauth.sql` | `mcp_user`, `mcp_oauth_client`, `mcp_oauth_code`, `mcp_oauth_token` (OAuth sign-in) |
 | 0.3.0 | `0004_caches.sql` | `airport_cache`, `route_cache` |
+| 0.4.1 | `0005_route_scan.sql` | `route_scan` (cached route sets per filter; replaces `route_cache`, which is no longer used) |
 
 The updater and Settings → Save (with a DB admin login) apply pending migrations automatically. To apply one by hand, run its file from `migrations/` as a DB admin, then record it so the installer knows it's done, e.g. `INSERT IGNORE INTO schema_migration (version, applied_at) VALUES ('0004', UTC_TIMESTAMP());`. Every migration only adds tables (`IF NOT EXISTS`) and the record uses `INSERT IGNORE`, so running either twice, or by hand and through the updater, is harmless.
 
@@ -199,17 +200,23 @@ Other clients only work if their redirect host is allowed in `oauth.allowed_redi
 
 | Tool | What it does |
 |---|---|
-| `list_airlines` | Lists the configured airline keys (plus name and weight unit). Call this first. |
-| `find_routes` | Finds routes and returns **compact summaries**, never the whole route set. Departure and arrival come back as ICAO codes (`dep`/`arr`, plus `dep_iata`/`arr_iata`). |
-| `count_routes` | Counts routes matching the same filters without listing them, for questions like "how many routes are missing a departure time?". Optional `breakdown`: `tag` (top 15 tags) or `visibility` (hidden vs visible). With `dep` and/or `arr` it's fast, usually a single request. Without them it reads the airline's whole route set (see *Caching*). |
+| `list_airlines` | Lists the configured airline keys (plus name and weight unit). |
+| `find_routes` | Finds routes and returns **compact summaries**, never the whole route set. Departure and arrival come back as ICAO codes (`dep`/`arr`, plus `dep_iata`/`arr_iata`). Pages through results with `offset`/`next_offset`. |
+| `count_routes` | Counts routes matching the same filters without listing them, e.g. "how many routes between Prague and Antalya?" or "how many routes are missing a departure time?". Optional `breakdown`: `tag` (top 15 tags), `visibility` (hidden vs visible), `dep` or `arr` (top 15 airports). |
+| `get_route` | Full details of one route by ID: routing, times, flight length, altitude, service days, dates, fleet IDs and more (internal remarks and SimBrief options are left out). |
+| `find_duplicates` | Routes that look duplicated: `by: "schedule"` (same dep, arr, flight number and times; default) or `by: "flight_number"` (one flight number on several routes). |
 
-**Common arguments** (`find_routes` and `count_routes`):
-- `airline` (required)
-- `dep` / `arr`: ICAO or IATA code
+**Common arguments** (`find_routes`, `count_routes`; `find_duplicates` takes `dep`, `arr`, `tag`, `hidden`):
+- `airline`: may be left out when only one airline is configured
+- `dep` / `arr`: ICAO or IATA code; `both_directions: true` also includes arr → dep
 - `tag`: case-sensitive; comma-separated means the route must have all of them
+- `flight_number`, `callsign`: exact match
+- `hidden`: `true` = only hidden routes, `false` = only visible ones
 - `missing_field`: the field is empty, e.g. `departure_time`, `flight_distance`, `remarks`, `fleet_ids`
-- `refresh`: don't use the cached route set and read from vAMSYS. With `dep`/`arr` that's a quick filtered read; without them it re-reads the full route set.
-- `limit` (`find_routes` only): 1–50, default 20
+- `refresh`: don't use cached route sets; read from vAMSYS
+- `limit` (1–50, default 20) and `offset` (`find_routes` only)
+
+**What it costs.** vAMSYS allows a limited number of requests per minute per airline and never reports totals, so counting means reading the routes. Everything vAMSYS can filter is filtered there. `dep`/`arr`, `flight_number` and `callsign` are fast (usually one request); `tag` and `hidden` are too, unless a tag is on most routes. Only `missing_field` (or no filter at all) needs the airline's **whole route set**, which for a large airline can take two or more calls. The tool descriptions and server instructions tell the AI this.
 
 **What the result fields mean:**
 
@@ -218,16 +225,18 @@ Other clients only work if their redirect host is allowed in `oauth.allowed_redi
 | `complete` | `true` when every relevant route was examined. Then `matched` is exact. |
 | `scanned` | How many routes were examined. |
 | `total_routes` | Size of the airline's whole route set. Only present when the full set was read. |
-| `source` | Where the routes came from: `cache` (a recently read full set), `scan` (the full set read now) or `live` (only the routes vAMSYS returns for the airport filters; `find_routes` also stops as soon as it has `limit` matches). |
-| `retry_after_seconds` | Only on a scan that paused at the request cap: when the next call can continue. |
+| `source` | `cache` (a recently read set, no API calls), `scan` (the whole route set read now) or `live` (the routes vAMSYS returned for the filters, read now). |
+| `as_of` | When the routes were read (UTC). |
+| `resumable`, `retry_after_seconds`, `progress`, `note` | Only when a read paused (`complete: false`): call again with the same arguments after `retry_after_seconds` (0 = at once). `progress` estimates the share done, based on the previous complete read. |
 
 If an airport ID can't be resolved, the output shows `dep_id`/`arr_id` with `dep_unresolved`/`arr_unresolved: true`.
 
 **Caching:**
-- **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h) and used to show routes with codes. It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters (`dep`/`arr`) are resolved from the same cache. If the cache is empty, expired or doesn't have the code, one filtered `/airports` request looks up just that code; a filter never reloads the whole list.
-- **Routes:** with `dep`/`arr`, both tools ask vAMSYS for just the matching routes. Without them, `count_routes` (and `find_routes` with `refresh: true`) read the airline's **full route set** once and reuse it for `vamsys.route_cache_ttl` (default 10 min). A fresh full set also answers filtered questions, with no API calls.
-- **Large route networks:** a full read stops at the per-airline request cap (it never waits and never goes over) or at `vamsys.scan_time_budget_seconds` (default 20 s, to stay below PHP's time limit). It then returns a partial result with `complete: false` and `retry_after_seconds`, and the next call continues where it stopped. A filtered read has the same limits but isn't saved, so if it pauses (only likely for a very large hub) the next call starts over; giving both `dep` and `arr` keeps it small.
-- **A resumed scan isn't a single snapshot.** Its pages can be read minutes apart, so routes changed in vAMSYS during that time (for example by a bulk import script) may be counted in their old or new state. Avoid counting while bulk route imports are running.
+- **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h) and used to show routes with codes. It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters (`dep`/`arr`) come from the same cache. If the cache is empty, expired or doesn't have the code, one filtered `/airports` request looks up just that code; a filter never reloads the whole list.
+- **Routes:** the cache is filled only by questions; nothing runs in the background. Every route set a question reads (the whole set, or the routes for one combination of vAMSYS filters) is cached for `vamsys.route_cache_ttl` (default 10 min), so follow-up questions are cheap. A fresh whole set answers any question without API calls. The last complete set keeps answering while a newer read is in progress.
+- **Long reads pause and resume.** A read stops at the per-airline request cap (it never waits and never goes over), or before the next page would end after `vamsys.scan_time_budget_seconds` (default 15 s, so a call stays well below the ~25–30 s MCP client timeout and PHP's time limit). It then returns a partial result, and the next call continues where it stopped.
+- **One read at a time.** If two calls need the same route set, the second waits for the first and then continues its work, instead of reading the same pages twice.
+- **A resumed read isn't a single snapshot.** Its pages can be read minutes apart, so routes changed in vAMSYS during that time (for example by a bulk import script) may be counted in their old or new state. Avoid counting while bulk route imports are running.
 
 All tools are marked read-only. Outputs are kept small on purpose, because every byte ends up in the AI's context.
 
@@ -290,16 +299,16 @@ The workflow then:
 
 - More question-oriented read tools: PIREP review queues, fleet/aircraft summaries, airport lookups, statistics.
 - **Write tools with a dry-run/diff step.** A write would first return exactly what would change (a diff against the current vAMSYS data) and apply it only after explicit confirmation. Writes will respect vAMSYS semantics such as "explicit `null` clears a value, omitting a field keeps it".
-- Optional cache of airport ID ↔ ICAO codes to enrich route output.
+- Fleet and service-day filters (`filter[fleet_id]`, `filter[service_day]`), with fleet names instead of IDs.
 
 ## Open questions
 
 1. **Other MCP clients.** The built-in OAuth server is tested against Claude's requirements (claude.ai, Desktop, Claude Code) and the MCP Inspector. Other clients need their redirect host added to `oauth.allowed_redirect_hosts` and may differ in details.
 2. **vAMSYS token lifetime.** The OpenAPI spec says tokens last 24 hours (`expires_in` 86400); operators report 7 days (604800). The server simply trusts `expires_in` from each response.
-3. **Maximum `page[size]`.** It isn't documented. The default here is 100; lower `vamsys.page_size` if vAMSYS rejects it.
+3. **Maximum `page[size]`.** It isn't documented. The default here is 100; lower `vamsys.page_size` if vAMSYS rejects it. If vAMSYS accepts more (try 500), reading a whole route set takes proportionally fewer requests.
 4. **Does `/oauth/token` count against the 100/min limit?** This server counts it, to be safe.
 5. **Protocol versions.** The server accepts both the stateless `2026-07-28` protocol and the older session-based one, so it works with any current client. Once all clients use the new protocol, the session directory can go.
-6. **Airport codes in route output.** `/routes` returns airport IDs. `find_routes` shows ICAO codes for the airports you filtered by, and IDs for the rest.
+6. **How vAMSYS applies some filters.** The spec doesn't say whether `filter[tag]`, `filter[flight_number]` and `filter[callsign]` ignore case, or which value `filter[hidden]` expects (this server sends `1`/`0`). Every result is re-checked locally with the documented meaning (tags case-sensitive, flight number and callsign case-insensitive). A looser vAMSYS filter therefore can't change an answer, but a stricter one could leave routes out.
 7. **Shared hosts without `ext-ftp`.** If PHP can't write its own files *and* the host has no FTP extension, the web updater can't apply updates; upload the new release by FTP manually. An SFTP or cURL-FTP writer could cover more hosts.
 
 ## License

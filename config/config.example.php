@@ -46,9 +46,9 @@ return [
         'token_refresh_margin_seconds' => 300, // refresh cached tokens this long before they expire
         'http_timeout_seconds' => 20,
         'airport_cache_ttl' => 86400,          // seconds before the cached airport list (ID -> ICAO/IATA) is reloaded
-        'route_cache_ttl' => 600,              // seconds a full route set is reused by count_routes/find_routes
+        'route_cache_ttl' => 600,              // seconds a route set read for one question is reused for the next ones
         'scan_max_pages' => 100,               // most pages one full scan (routes or airports) reads per call
-        'scan_time_budget_seconds' => 20,      // a route scan pauses after this long and continues on the next call; keep below max_execution_time
+        'scan_time_budget_seconds' => 15,      // a route scan pauses after this long and continues on the next call; keep well below max_execution_time and MCP clients' ~25 s timeout
     ],
 
     // Log every outgoing vAMSYS call (airline, path, status, duration) to call_log.

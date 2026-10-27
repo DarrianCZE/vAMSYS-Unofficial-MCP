@@ -10,23 +10,29 @@ use VamsysMcp\Sql;
 use VamsysMcp\VamsysClient;
 
 /**
- * An airline's full route set (projected, see RouteRecord), cached in
- * route_cache for a short TTL so counts and searches don't re-read vAMSYS.
+ * Route sets (projected, see RouteRecord) cached in route_scan per query: the
+ * airline's full set (no filters) and the subsets vAMSYS returns for
+ * server-side filters (RouteFilter::serverQueries()).
  *
- * Reading the full set is a resumable scan: each call reads pages until the
- * set is complete, the time budget is used up (shared hosting kills long PHP
- * requests) or the per-airline request cap is reached. It never waits for the
- * rate limiter and never exceeds the cap. Progress (routes so far + cursor)
- * is saved, so the next call continues instead of starting over.
- *
- * matching() reads only the routes vAMSYS returns for server-side filters,
- * under the same limits. It is not cached: such sets are small, and reading
- * them again is cheaper than reading the full set once.
+ * Reading a set is a resumable scan: each call reads pages until the set is
+ * complete, the time budget would be exceeded (MCP clients time out after
+ * ~25-30 s; shared hosting kills long PHP requests) or the per-airline request
+ * cap is reached. It never waits for the rate limiter and never exceeds the
+ * cap. Progress (routes so far + cursor) is saved, so the next call continues
+ * instead of starting over. The last complete set keeps answering until a
+ * new scan completes. A per-set lock (ScanLock) keeps two calls from reading
+ * the same set at once: the second waits, then continues the first's work.
  */
 final class RouteCache
 {
+    /** Filtered sets not read for this long are deleted. */
+    private const int FILTERED_MAX_AGE = 86400;
+    /** Suggested wait when another call holds the scan lock. */
+    private const int BUSY_RETRY_SECONDS = 5;
+
     /** @var \Closure(): float */
     private readonly \Closure $time;
+    private readonly ScanLock $lock;
 
     /**
      * @param null|\Closure(): float $time seconds clock for the time budget (injectable for tests)
@@ -37,87 +43,139 @@ final class RouteCache
         private readonly ClockInterface $clock,
         private readonly int $ttlSeconds = 600,
         private readonly int $maxPagesPerCall = 100,
-        private readonly float $timeBudgetSeconds = 20.0,
+        private readonly float $timeBudgetSeconds = 15.0,
         ?\Closure $time = null,
+        ?ScanLock $lock = null,
     ) {
         $this->time = $time ?? static fn (): float => microtime(true);
+        $this->lock = $lock ?? new ScanLock($pdo);
+    }
+
+    public function ttlSeconds(): int
+    {
+        return $this->ttlSeconds;
     }
 
     /**
-     * The cached complete set if it is younger than the TTL, without calling vAMSYS.
+     * Fresh complete routes for $filter without calling vAMSYS: the full set,
+     * else (with a filter) every one of its server-side query sets.
      */
-    public function fresh(string $airline): ?RouteSet
+    public function fresh(string $airline, ?RouteFilter $filter = null): ?RouteSet
     {
-        return $this->freshFrom($this->load($airline));
+        $full = $this->freshFrom($this->load($airline, ''), false);
+        if ($full !== null || $filter === null || ($queries = $filter->serverQueries()) === []) {
+            return $full;
+        }
+        $sets = [];
+        foreach ($queries as $query) {
+            $set = $this->freshFrom($this->load($airline, self::key($query)), true);
+            if ($set === null) {
+                return null;
+            }
+            $sets[] = $set;
+        }
+
+        return self::merge($sets);
     }
 
     /**
-     * The full set: from the cache when fresh (unless $refresh), otherwise by
-     * scanning (or continuing an unfinished scan) within the budget.
+     * The routes $filter needs: from the cache when fresh (unless $refresh),
+     * else by scanning its server-side queries, or the full set when it has
+     * none, all within one time budget.
      */
-    public function get(string $airline, bool $refresh = false): RouteSet
+    public function forFilter(string $airline, RouteFilter $filter, bool $refresh = false): RouteSet
     {
-        $row = $this->load($airline);
-        if (!$refresh && ($cached = $this->freshFrom($row)) !== null) {
+        if (!$refresh && ($cached = $this->fresh($airline, $filter)) !== null) {
+            return $cached;
+        }
+        $deadline = ($this->time)() + $this->timeBudgetSeconds;
+        $queries = $filter->serverQueries() ?: [[]];
+
+        return self::merge(array_map(fn (array $query): RouteSet => $this->scan($airline, $query, $refresh, $deadline), $queries));
+    }
+
+    /**
+     * One set: the full set for an empty $query, else the routes vAMSYS returns
+     * for these filter[...] parameters. With $refresh the cached complete set
+     * is not used, but an unfinished scan still continues (so calling again
+     * with the same arguments makes progress).
+     *
+     * @param array<string, string> $query
+     * @param float|null            $deadline time() by which to stop; default now + the time budget
+     */
+    public function scan(string $airline, array $query = [], bool $refresh = false, ?float $deadline = null): RouteSet
+    {
+        $key = self::key($query);
+        $filtered = $query !== [];
+        $deadline ??= ($this->time)() + $this->timeBudgetSeconds;
+        if (!$refresh && ($cached = $this->freshFrom($this->load($airline, $key), $filtered)) !== null) {
             return $cached;
         }
 
-        $resume = !$refresh && $row !== null && (int) $row['complete'] !== 1 && !Sql::olderThan($row['started_at'], $this->ttlSeconds, $this->clock->now());
-        $routes = $resume ? self::decode($row['data']) : [];
-        $cursor = $resume ? $row['next_cursor'] : null;
-        $startedAt = $resume ? (string) $row['started_at'] : Sql::now($this->clock->now());
+        $lockName = "scan:{$airline}:{$key}";
+        if (!$this->lock->acquire($lockName, $deadline - ($this->time)() - 1.0)) {
+            $row = $this->load($airline, $key);
 
-        [$complete, $cursor, $stop, $retryAfter] = $this->read($airline, [], $cursor, $routes);
-
-        $fetchedAt = $complete ? Sql::now($this->clock->now()) : null;
-        Sql::upsert($this->pdo, 'route_cache', 'airline', [
-            'airline' => $airline,
-            'started_at' => $startedAt,
-            'fetched_at' => $fetchedAt,
-            'complete' => $complete ? 1 : 0,
-            'next_cursor' => $complete ? null : $cursor,
-            'route_count' => count($routes),
-            'data' => (string) json_encode($routes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES),
-        ]);
-
-        return new RouteSet($routes, $complete, false, $fetchedAt, $stop, $retryAfter);
-    }
-
-    /**
-     * The routes vAMSYS returns for the filter's server-side part
-     * (RouteFilter::toQuery(), which must not be empty), read now within the
-     * same budget as a full scan. Not cached, not resumable.
-     */
-    public function matching(string $airline, RouteFilter $filter): RouteSet
-    {
-        $query = $filter->toQuery();
-        if ($query === []) {
-            throw new \LogicException('RouteCache::matching() needs at least one server-side filter.');
+            return (!$refresh ? $this->freshFrom($row, $filtered) : null)
+                ?? $this->partial($row, $filtered, 'busy', self::BUSY_RETRY_SECONDS);
         }
-        $routes = [];
-        [$complete, , $stop, $retryAfter] = $this->read($airline, $query, null, $routes);
+        try {
+            // Another call may have finished or advanced this scan while we waited.
+            $row = $this->load($airline, $key);
+            if (!$refresh && ($cached = $this->freshFrom($row, $filtered)) !== null) {
+                return $cached;
+            }
+            $resume = $this->scanInProgress($row);
+            $routes = $resume ? self::decode($row['scan_data']) : [];
+            $cursor = $resume && is_string($row['scan_cursor']) ? $row['scan_cursor'] : null;
+            $startedAt = $resume ? (string) $row['scan_started_at'] : Sql::now($this->clock->now());
 
-        return new RouteSet($routes, $complete, false, $complete ? Sql::now($this->clock->now()) : null, $stop, $retryAfter, filtered: true);
+            [$complete, $cursor, $stop, $retryAfter] = $this->read($airline, $query, $cursor, $routes, $deadline);
+
+            if ($complete) {
+                $fetchedAt = Sql::now($this->clock->now());
+                Sql::upsert($this->pdo, 'route_scan', ['airline', 'query_key'], [
+                    'airline' => $airline, 'query_key' => $key,
+                    'fetched_at' => $fetchedAt, 'route_count' => count($routes), 'data' => self::encode($routes),
+                    'scan_started_at' => null, 'scan_cursor' => null, 'scan_data' => null,
+                ]);
+                if ($filtered) {
+                    $this->pruneFiltered($airline);
+                }
+
+                return new RouteSet($routes, true, false, $fetchedAt, null, filtered: $filtered);
+            }
+            Sql::upsert($this->pdo, 'route_scan', ['airline', 'query_key'], [
+                'airline' => $airline, 'query_key' => $key,
+                'scan_started_at' => $startedAt, 'scan_cursor' => $cursor, 'scan_data' => self::encode($routes),
+            ]);
+
+            return new RouteSet($routes, false, false, null, $stop, $retryAfter ?? 0, $filtered, self::progress(count($routes), $row));
+        } finally {
+            $this->lock->release($lockName);
+        }
     }
 
     /**
      * Read pages of /routes from $cursor, appending projected routes, until the
-     * end, the page limit, the time budget or the request cap (never waited for).
+     * end, the page limit, the request cap (never waited for) or the point
+     * where the next page would probably end after $deadline.
      *
      * @param array<string, string>      $filters vAMSYS filter[...] parameters
      * @param list<array<string, mixed>> $routes
      *
      * @return array{0: bool, 1: string|null, 2: string|null, 3: int|null} complete, cursor to continue from, stop reason, retry-after seconds
      */
-    private function read(string $airline, array $filters, ?string $cursor, array &$routes): array
+    private function read(string $airline, array $filters, ?string $cursor, array &$routes, float $deadline): array
     {
-        $deadline = ($this->time)() + $this->timeBudgetSeconds;
+        $slowest = 0.0;
         for ($pages = 0; ; ++$pages) {
             if ($pages >= $this->maxPagesPerCall) {
-                return [false, $cursor, 'page_limit', null];
+                return [false, $cursor, 'page_limit', 0];
             }
-            if ($pages > 0 && ($this->time)() >= $deadline) {
-                return [false, $cursor, 'time_budget', null];
+            $started = ($this->time)();
+            if ($pages > 0 && $started + $slowest >= $deadline) {
+                return [false, $cursor, 'time_budget', 0];
             }
             $query = ['sort' => 'id'] + $filters + ($cursor !== null ? ['page[cursor]' => $cursor] : []);
             try {
@@ -125,6 +183,7 @@ final class RouteCache
             } catch (RateLimitExceededException $e) {
                 return [false, $cursor, 'rate_limit', $e->retryAfterSeconds];
             }
+            $slowest = max($slowest, ($this->time)() - $started);
             foreach ((array) ($body['data'] ?? []) as $route) {
                 $routes[] = RouteRecord::project((array) $route);
             }
@@ -139,25 +198,116 @@ final class RouteCache
     /**
      * @param array<string, mixed>|null $row
      */
-    private function freshFrom(?array $row): ?RouteSet
+    private function freshFrom(?array $row, bool $filtered): ?RouteSet
     {
-        if ($row === null || (int) $row['complete'] !== 1 || Sql::olderThan($row['fetched_at'], $this->ttlSeconds, $this->clock->now())) {
+        if ($row === null || $row['data'] === null || Sql::olderThan($row['fetched_at'], $this->ttlSeconds, $this->clock->now())) {
             return null;
         }
 
-        return new RouteSet(self::decode($row['data']), true, true, (string) $row['fetched_at'], null);
+        return new RouteSet(self::decode($row['data']), true, true, (string) $row['fetched_at'], null, filtered: $filtered);
+    }
+
+    /**
+     * What a call that could not get the lock can report: the other call's progress so far.
+     *
+     * @param array<string, mixed>|null $row
+     */
+    private function partial(?array $row, bool $filtered, string $stop, int $retryAfter): RouteSet
+    {
+        $routes = $this->scanInProgress($row) ? self::decode($row['scan_data']) : [];
+
+        return new RouteSet($routes, false, false, null, $stop, $retryAfter, $filtered, self::progress(count($routes), $row));
+    }
+
+    /**
+     * @param array<string, mixed>|null $row
+     */
+    private function scanInProgress(?array $row): bool
+    {
+        return $row !== null && $row['scan_data'] !== null && !Sql::olderThan($row['scan_started_at'], $this->ttlSeconds, $this->clock->now());
+    }
+
+    /**
+     * Share read so far, estimated from the size of the last complete set.
+     *
+     * @param array<string, mixed>|null $row
+     */
+    private static function progress(int $read, ?array $row): ?float
+    {
+        $total = (int) ($row['route_count'] ?? 0);
+
+        return $total > 0 ? min(0.99, round($read / $total, 2)) : null;
+    }
+
+    /**
+     * @param list<RouteSet> $sets
+     */
+    private static function merge(array $sets): RouteSet
+    {
+        if (count($sets) === 1) {
+            return $sets[0];
+        }
+        $routes = [];
+        foreach ($sets as $set) {
+            foreach ($set->routes as $route) {
+                $routes[$route['id']] = $route;
+            }
+        }
+        ksort($routes);
+        $incomplete = array_values(array_filter($sets, static fn (RouteSet $s): bool => !$s->complete));
+        $complete = $incomplete === [];
+        $fetched = array_filter(array_map(static fn (RouteSet $s): ?string => $s->fetchedAt, $sets));
+
+        return new RouteSet(
+            array_values($routes),
+            $complete,
+            array_reduce($sets, static fn (bool $all, RouteSet $s): bool => $all && $s->fromCache, true),
+            $complete && $fetched !== [] ? min($fetched) : null,
+            $incomplete[0]->stopReason ?? null,
+            $complete ? null : max(array_map(static fn (RouteSet $s): int => $s->retryAfterSeconds ?? 0, $incomplete)),
+            true,
+        );
+    }
+
+    private function pruneFiltered(string $airline): void
+    {
+        $before = Sql::now($this->clock->now()->modify('-' . self::FILTERED_MAX_AGE . ' seconds'));
+        $this->pdo->prepare("DELETE FROM route_scan WHERE airline = :a AND query_key <> ''
+            AND (fetched_at IS NULL OR fetched_at < :b) AND (scan_started_at IS NULL OR scan_started_at < :b2)")
+            ->execute(['a' => $airline, 'b' => $before, 'b2' => $before]);
+    }
+
+    /**
+     * @param array<string, string> $query
+     */
+    private static function key(array $query): string
+    {
+        if ($query === []) {
+            return '';
+        }
+        ksort($query);
+
+        return sha1(http_build_query($query));
     }
 
     /**
      * @return array<string, mixed>|null
      */
-    private function load(string $airline): ?array
+    private function load(string $airline, string $key): ?array
     {
-        $stmt = $this->pdo->prepare('SELECT started_at, fetched_at, complete, next_cursor, data FROM route_cache WHERE airline = :a');
-        $stmt->execute(['a' => $airline]);
+        $stmt = $this->pdo->prepare('SELECT fetched_at, route_count, data, scan_started_at, scan_cursor, scan_data FROM route_scan WHERE airline = :a AND query_key = :k');
+        $stmt->execute(['a' => $airline, 'k' => $key]);
         $row = $stmt->fetch(\PDO::FETCH_ASSOC);
 
         return is_array($row) ? $row : null;
+    }
+
+    /**
+     * @param list<array<string, mixed>> $routes
+     */
+    private static function encode(array $routes): string
+    {
+        return (string) json_encode($routes, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
     }
 
     /**

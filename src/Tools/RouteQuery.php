@@ -8,30 +8,62 @@ use Mcp\Exception\ToolCallException;
 use VamsysMcp\Cache\AirportCache;
 use VamsysMcp\Cache\RouteFilter;
 use VamsysMcp\Cache\RouteRecord;
+use VamsysMcp\Config;
 use VamsysMcp\Exception\VamsysMcpException;
 
 /**
- * Shared by find_routes and count_routes: turns tool arguments into a
- * RouteFilter (airport codes resolved through the airport cache, so no extra
- * API calls) and turns routes into compact summaries with airport codes.
+ * Shared by the route tools: resolves the airline argument, turns tool
+ * arguments into a RouteFilter (airport codes resolved through the airport
+ * cache) and turns routes into compact summaries with airport codes.
  */
 final class RouteQuery
 {
-    public function __construct(private readonly AirportCache $airports)
-    {
+    public function __construct(
+        private readonly AirportCache $airports,
+        private readonly Config $config,
+    ) {
     }
 
     /**
-     * @return array{0: RouteFilter, 1: array<string, string>} the filter and the filters as understood, for the output
+     * The airline to use: the argument, or the only configured airline.
+     *
+     * @throws ToolCallException
      */
-    public function filter(string $airline, ?string $dep, ?string $arr, ?string $tag, ?string $missingField): array
+    public function airline(?string $airline): string
     {
+        try {
+            return $this->config->airlineKey($airline);
+        } catch (VamsysMcpException $e) {
+            throw new ToolCallException($e->getMessage(), 0, $e);
+        }
+    }
+
+    /**
+     * @return array{0: RouteFilter, 1: array<string, mixed>} the filter and the filters as understood, for the output
+     */
+    public function filter(
+        string $airline,
+        ?string $dep = null,
+        ?string $arr = null,
+        ?string $tag = null,
+        ?string $missingField = null,
+        bool $bothDirections = false,
+        ?string $flightNumber = null,
+        ?string $callsign = null,
+        ?bool $hidden = null,
+    ): array {
         if ($missingField !== null && !in_array($missingField, RouteRecord::MISSING_FIELDS, true)) {
             throw new ToolCallException('missing_field must be one of: ' . implode(', ', RouteRecord::MISSING_FIELDS) . '.');
         }
         $echo = [];
         $depId = $this->resolve($airline, $dep, 'dep', $echo);
         $arrId = $this->resolve($airline, $arr, 'arr', $echo);
+        if ($bothDirections) {
+            if ($depId === null || $arrId === null) {
+                throw new ToolCallException('both_directions needs both dep and arr.');
+            }
+            $echo['both_directions'] = true;
+        }
         $tags = RouteFilter::parseTags($tag);
         if ($tags !== []) {
             $echo['tag'] = implode(',', $tags);
@@ -39,8 +71,35 @@ final class RouteQuery
         if ($missingField !== null) {
             $echo['missing_field'] = $missingField;
         }
+        $flightNumber = self::text($flightNumber);
+        $callsign = self::text($callsign);
+        $echo += array_filter(['flight_number' => $flightNumber, 'callsign' => $callsign, 'hidden' => $hidden], static fn (mixed $v): bool => $v !== null);
 
-        return [new RouteFilter($depId, $arrId, $tags, $missingField), $echo];
+        return [new RouteFilter($depId, $arrId, $tags, $missingField, $bothDirections, $flightNumber, $callsign, $hidden), $echo];
+    }
+
+    /**
+     * Airport fields for a pair of IDs (dep/arr codes, see endpoint()).
+     *
+     * @return array<string, mixed>
+     */
+    public function endpoints(string $airline, int $depId, int $arrId): array
+    {
+        $airports = $this->codes($airline, [$depId, $arrId]);
+
+        return self::endpoint('dep', $depId, $airports[$depId] ?? null) + self::endpoint('arr', $arrId, $airports[$arrId] ?? null);
+    }
+
+    /**
+     * ICAO (else IATA) code per airport ID; IDs that cannot be resolved are missing.
+     *
+     * @param list<int> $ids
+     *
+     * @return array<int, string>
+     */
+    public function codeMap(string $airline, array $ids): array
+    {
+        return array_filter(array_map(static fn (array $a): ?string => $a['icao'] ?? $a['iata'], $this->codes($airline, $ids)));
     }
 
     /**
@@ -58,11 +117,7 @@ final class RouteQuery
             $ids[] = $r['departure_id'];
             $ids[] = $r['arrival_id'];
         }
-        try {
-            $airports = $this->airports->lookup($airline, $ids);
-        } catch (VamsysMcpException) {
-            $airports = []; // codes are a convenience; never fail the search because of them
-        }
+        $airports = $this->codes($airline, $ids);
 
         return array_map(static function (array $r) use ($airports): array {
             $summary = ['id' => $r['id'], 'flight_number' => $r['flight_number'], 'callsign' => $r['callsign']]
@@ -81,7 +136,26 @@ final class RouteQuery
     }
 
     /**
-     * @param array<string, string> $echo
+     * @param list<int> $ids
+     *
+     * @return array<int, array{id: int, icao: string|null, iata: string|null, name: string}>
+     */
+    private function codes(string $airline, array $ids): array
+    {
+        try {
+            return $this->airports->lookup($airline, $ids);
+        } catch (VamsysMcpException) {
+            return []; // codes are a convenience; never fail the answer because of them
+        }
+    }
+
+    private static function text(?string $value): ?string
+    {
+        return $value === null || trim($value) === '' ? null : trim($value);
+    }
+
+    /**
+     * @param array<string, mixed> $echo
      */
     private function resolve(string $airline, ?string $code, string $label, array &$echo): ?int
     {
