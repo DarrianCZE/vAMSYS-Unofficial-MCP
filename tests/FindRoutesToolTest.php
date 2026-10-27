@@ -82,7 +82,9 @@ final class FindRoutesToolTest extends TestCase
                 return FakeHttpClient::token();
             }
             $items = match ($path) {
-                '/api/airports' => $this->airports,
+                '/api/airports' => array_values(array_filter($this->airports, static fn (array $airport): bool =>
+                    (!isset($q['filter']['icao']) || $airport['icao'] === $q['filter']['icao'])
+                    && (!isset($q['filter']['iata']) || $airport['iata'] === $q['filter']['iata']))),
                 '/api/routes' => array_values(array_filter($this->routes, static fn (array $route): bool =>
                     (!isset($q['filter']['departure_id']) || (string) $route['departure_id'] === $q['filter']['departure_id'])
                     && (!isset($q['filter']['arrival_id']) || (string) $route['arrival_id'] === $q['filter']['arrival_id']))),
@@ -95,9 +97,10 @@ final class FindRoutesToolTest extends TestCase
         });
     }
 
-    private function requests(string $path): int
+    private function requests(string $path, ?string $queryPart = null): int
     {
-        return count(array_filter($this->http->requests, static fn (RequestInterface $r): bool => $r->getUri()->getPath() === $path));
+        return count(array_filter($this->http->requests, static fn (RequestInterface $r): bool => $r->getUri()->getPath() === $path
+            && ($queryPart === null || str_contains(urldecode($r->getUri()->getQuery()), $queryPart))));
     }
 
     /** @return array<string, mixed> */
@@ -114,13 +117,66 @@ final class FindRoutesToolTest extends TestCase
         self::assertSame(['dep' => 'LKPR'], $result['filters']);
         self::assertSame(['id' => 1, 'flight_number' => 'SW1', 'dep' => 'LKPR', 'dep_iata' => 'PRG', 'arr' => 'EGLL', 'arr_iata' => 'LHR', 'dep_time' => '08:00:00', 'tags' => ['Europe']], $result['routes'][0]);
         self::assertSame('KJFK', $result['routes'][1]['arr']);
-        self::assertSame(2, $this->requests('/api/airports'), 'airport list read once (2 pages)');
+        self::assertSame(1, $this->requests('/api/airports', 'filter[iata]=PRG'), 'cold cache: the filter code cost one filtered request');
+        self::assertSame(3, $this->requests('/api/airports'), '+ the airport list read once (2 pages) for the output codes');
 
         $this->call($this->find, 'swv', dep: 'LKPR', arr: 'egll');
-        self::assertSame(2, $this->requests('/api/airports'), 'ICAO/IATA filters resolved from the cache, no extra calls');
-        foreach ($this->http->requests as $r) {
-            self::assertStringNotContainsString('filter%5Bicao%5D', $r->getUri()->getQuery());
-        }
+        self::assertSame(3, $this->requests('/api/airports'), 'ICAO/IATA filters resolved from the fresh cache, no extra calls');
+    }
+
+    public function testFilterCodesNeverReloadTheAirportList(): void
+    {
+        // Cold cache: two filtered lookups, one filtered /routes page, no airport list, no full route scan.
+        $result = $this->call($this->count, 'swv', dep: 'LKPR', arr: 'LHR');
+        self::assertSame(['live', true, 2, 2, null], [$result['source'], $result['complete'], $result['matched'], $result['scanned'], $result['total_routes']]);
+        self::assertSame(['dep' => 'LKPR', 'arr' => 'EGLL'], $result['filters']);
+        self::assertSame(2, $this->requests('/api/airports'));
+        self::assertSame(2, $this->requests('/api/airports', 'filter['));
+        self::assertSame(1, $this->requests('/api/routes'));
+        self::assertSame(1, $this->requests('/api/routes', 'filter[departure_id]=10&filter[arrival_id]=20'));
+
+        // A stale list is not reloaded for a filter either.
+        $this->airportCache->reload('swv');
+        $this->clock->advance(86401);
+        $this->call($this->count, 'swv', dep: 'JFK');
+        self::assertSame(5, $this->requests('/api/airports'), '2 lookups + 2-page list + 1 lookup');
+
+        self::assertSame(0, $this->call($this->count, 'swv', arr: 'LKPR', missing_field: 'departure_time', tag: 'Longhaul')['matched'], 'local filters still apply');
+    }
+
+    public function testNarrowCountIgnoresAnUnfinishedFullScanAndUsesAFreshOne(): void
+    {
+        $this->build(3); // token + 2 pages
+        self::assertFalse($this->call($this->count, 'swv')['complete']);
+
+        $this->clock->advance(60);
+        $narrow = $this->call($this->count, 'swv', dep: 'LKPR');
+        self::assertSame(['live', true, 3], [$narrow['source'], $narrow['complete'], $narrow['matched']]);
+
+        $this->clock->advance(60);
+        self::assertTrue($this->call($this->count, 'swv')['complete'], 'the full scan resumed later as before');
+        self::assertSame(['cache', 3], [($c = $this->call($this->count, 'swv', dep: 'LKPR'))['source'], $c['matched']]);
+        self::assertSame('live', $this->call($this->count, 'swv', dep: 'LKPR', refresh: true)['source'], 'refresh=true skips the cache');
+    }
+
+    public function testFindWithRefreshAndAirportFilterSearchesLive(): void
+    {
+        $this->call($this->count, 'swv'); // fills the route cache
+        $before = $this->requests('/api/routes');
+
+        $result = $this->call($this->find, 'swv', dep: 'LKPR', refresh: true);
+        self::assertSame(['live', true, 3], [$result['source'], $result['complete'], $result['matched']]);
+        self::assertSame($before + 2, $this->requests('/api/routes'), '3 matches in pages of 2, not a full re-read');
+    }
+
+    public function testNarrowCountPausesAtTheCapAndSaysWhenToRetry(): void
+    {
+        $this->build(3); // token + 1 lookup + 1 route page
+        $result = $this->call($this->count, 'swv', dep: 'LKPR');
+
+        self::assertSame(['live', false, 2, null], [$result['source'], $result['complete'], $result['scanned'], $result['total_routes']]);
+        self::assertSame(50, $result['retry_after_seconds'], 'clock is 10 s into the minute');
+        self::assertStringContainsString('in about 50 seconds; it starts over', $result['note']);
     }
 
     public function testUnknownAirportIdReloadsOnceThenFallsBackToUnresolved(): void
@@ -203,6 +259,8 @@ final class FindRoutesToolTest extends TestCase
         self::assertSame(4, $partial['matched']);
         self::assertNull($partial['total_routes']);
         self::assertStringContainsString('request cap', $partial['note']);
+        self::assertSame(50, $partial['retry_after_seconds']);
+        self::assertStringContainsString('Call again in about 50 seconds to continue', $partial['note']);
         self::assertSame(2, $this->requests('/api/routes'), 'stopped instead of exceeding the cap');
 
         $this->clock->advance(60); // next rate window

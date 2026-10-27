@@ -12,20 +12,26 @@ use VamsysMcp\Cache\RouteRecord;
 use VamsysMcp\Exception\VamsysMcpException;
 
 /**
- * Answers "how many routes …?" without listing them. Needs the airline's full
- * route set, which comes from the short-lived route cache or a resumable scan
- * that respects the per-airline request cap.
+ * Answers "how many routes …?" without listing them. With a dep/arr filter
+ * vAMSYS filters server-side and only the matching routes are read (usually
+ * one request). Otherwise it needs the airline's full route set, which comes
+ * from the short-lived route cache or a resumable scan that respects the
+ * per-airline request cap. A fresh cached full set is always used first.
  */
 final class CountRoutesTool
 {
     public const string NAME = 'count_routes';
     public const string DESCRIPTION = 'Count routes of a vAMSYS airline matching filters, without listing them. Same filters as find_routes '
         . '(dep/arr ICAO or IATA, tag case-sensitive with comma = all, missing_field). '
-        . 'Result: matched = routes matching the filters; scanned = routes examined; total_routes = size of the whole route set (null if not complete); '
-        . 'complete = true when every route was examined, so matched is exact. If complete is false the scan paused (request cap or time limit) '
-        . 'and matched only covers the scanned routes: call count_routes again to continue (progress is kept). '
+        . 'With dep and/or arr the count is fast (vAMSYS filters by airport); without them the airline\'s whole route set is read, '
+        . 'which for large airlines can take several calls. '
+        . 'Result: matched = routes matching the filters; scanned = routes examined; total_routes = size of the whole route set (only when it was read completely); '
+        . 'complete = true when every relevant route was examined, so matched is exact. '
+        . 'source = cache (recent full set), scan (full set read now) or live (only routes for the airport filters read now). '
+        . 'If complete is false the scan paused (request cap or time limit) and matched only covers the scanned routes: '
+        . 'follow the note, calling again after retry_after_seconds when given. '
         . 'Optional breakdown: "tag" (matched routes per tag, top 15) or "visibility" (hidden vs visible). '
-        . 'Uses a cached route set for a few minutes; refresh=true re-reads it from vAMSYS.';
+        . 'refresh=true ignores the cached route set and reads from vAMSYS.';
     private const int MAX_TAGS = 15;
 
     public function __construct(
@@ -68,7 +74,9 @@ final class CountRoutesTool
         }
         try {
             [$filter, $echo] = $this->query->filter($airline, $dep, $arr, $tag, $missing_field);
-            $set = $this->routes->get($airline, $refresh);
+            $set = $filter->isNarrow()
+                ? (!$refresh ? $this->routes->fresh($airline) : null) ?? $this->routes->matching($airline, $filter)
+                : $this->routes->get($airline, $refresh);
         } catch (VamsysMcpException $e) {
             throw new ToolCallException($e->getMessage(), 0, $e);
         }
@@ -79,9 +87,9 @@ final class CountRoutesTool
             'filters' => $echo,
             'matched' => count($matched),
             'scanned' => count($set->routes),
-            'total_routes' => $set->complete ? count($set->routes) : null,
+            'total_routes' => $set->complete && !$set->filtered ? count($set->routes) : null,
             'complete' => $set->complete,
-            'source' => $set->fromCache ? 'cache' : 'scan',
+            'source' => $set->filtered ? 'live' : ($set->fromCache ? 'cache' : 'scan'),
         ];
         if ($set->complete) {
             $result['as_of'] = $set->fetchedAt . ' UTC';
@@ -93,6 +101,9 @@ final class CountRoutesTool
             $result['by_visibility'] = ['visible' => count($matched) - $hidden, 'hidden' => $hidden];
         }
         if (!$set->complete) {
+            if ($set->retryAfterSeconds !== null) {
+                $result['retry_after_seconds'] = $set->retryAfterSeconds;
+            }
             $result['note'] = $set->pauseNote($this->routeCacheTtl);
         }
 

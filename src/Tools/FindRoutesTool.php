@@ -29,7 +29,8 @@ final class FindRoutesTool
         . 'Result fields: returned = routes in this answer; has_more = more matches exist beyond limit; '
         . 'complete = true if every relevant route was examined (then matched = exact number of matches); '
         . 'scanned = routes examined; total_routes = size of the airline\'s whole route set (only when the cached full set was used). '
-        . 'source = cache (recent full set), scan (full set read now because refresh=true) or live (paged search that stops early). '
+        . 'source = cache (recent full set), scan (full set read now because refresh=true without dep/arr) or live (paged search that stops early). '
+        . 'If a scan paused, follow the note (retry_after_seconds says when to call again). '
         . 'For "how many" questions use count_routes instead.';
 
     public function __construct(
@@ -48,7 +49,7 @@ final class FindRoutesTool
      * @param string|null $tag           Only routes that have this tag (case-sensitive; comma-separated = must have all)
      * @param string|null $missing_field Only routes where this field is empty
      * @param int         $limit         Maximum number of routes to return (1-50)
-     * @param bool        $refresh       Re-read the airline's full route set from vAMSYS instead of using the cache (slower, uses API quota)
+     * @param bool        $refresh       Don't use the cached route set; read from vAMSYS (with dep/arr a quick live search, otherwise the full route set: slower, uses API quota)
      */
     public function __invoke(
         string $airline,
@@ -68,7 +69,12 @@ final class FindRoutesTool
         $limit = max(1, min(50, $limit));
         try {
             [$filter, $echo] = $this->query->filter($airline, $dep, $arr, $tag, $missing_field);
-            $set = $refresh ? $this->routes->get($airline, true) : $this->routes->fresh($airline);
+            // refresh=true re-reads the full set only when vAMSYS can't filter by airport: a live search is fresh anyway.
+            $set = match (true) {
+                !$refresh => $this->routes->fresh($airline),
+                $filter->isNarrow() => null,
+                default => $this->routes->get($airline, true),
+            };
 
             return ToolResult::of($set !== null
                 ? $this->fromSet($airline, $echo, $set, $filter, $limit)
@@ -92,6 +98,9 @@ final class FindRoutesTool
         }
         $result += ['returned' => min($limit, count($matched)), 'has_more' => count($matched) > $limit, 'routes' => $this->query->summarise($airline, array_slice($matched, 0, $limit))];
         if (!$set->complete) {
+            if ($set->retryAfterSeconds !== null) {
+                $result['retry_after_seconds'] = $set->retryAfterSeconds;
+            }
             $result['note'] = $set->pauseNote($this->routeCacheTtl);
         }
 

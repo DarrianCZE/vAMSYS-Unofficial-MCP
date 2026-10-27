@@ -25,7 +25,7 @@ use VamsysMcp\Tools\RouteQuery;
 final class App
 {
     public const string NAME = 'vamsys-unofficial-mcp';
-    public const string VERSION = '0.3.0';
+    public const string VERSION = '0.4.0';
     /** Oldest installed version that may auto-update to this one (raise it when an update cannot be applied in place). */
     public const string UPDATE_FROM_MIN = '0.1.0';
     public const string REQUIRES_PHP = '8.4.0';

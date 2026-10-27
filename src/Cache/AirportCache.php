@@ -13,11 +13,13 @@ use VamsysMcp\VamsysClient;
  * Airport ID ↔ ICAO/IATA/name per airline, cached in airport_cache.
  *
  * The full airport list (GET /airports, paged by cursor through the rate
- * limiter) is reloaded when the cache is older than the TTL, or once per
- * request when an ID or code is missing. A cooldown keeps an airport that no
- * longer exists from triggering a reload on every call. A reload cut short by
- * the rate cap keeps what it got; stale rows are removed only after a
- * complete reload.
+ * limiter) is needed to show routes with codes. It is reloaded when the cache
+ * is older than the TTL, or once per request when an ID is missing. Codes
+ * given as filters never trigger a reload: a code that is not in the fresh
+ * cache costs one filtered request (see findByCode). A cooldown keeps an
+ * airport that no longer exists from triggering a reload on every call. A
+ * reload cut short by the rate cap keeps what it got; stale rows are removed
+ * only after a complete reload.
  */
 final class AirportCache
 {
@@ -57,12 +59,15 @@ final class AirportCache
     }
 
     /**
-     * Resolve an ICAO (4 letters) or IATA (3 letters) code.
+     * Resolve an ICAO (4 letters) or IATA (3 letters) code. Served from the
+     * cache while the airport list is fresh; otherwise (or when the code is
+     * not cached) one filtered /airports request answers it, so a filter
+     * never costs a full reload of the list. That answer is not stored: the
+     * list's freshness is judged by full reloads only.
      *
      * @return array{id: int, icao: string|null, iata: string|null, name: string}|null
      *
-     * @throws \InvalidArgumentException  for a malformed code
-     * @throws RateLimitExceededException when the code is unknown and the list could not be loaded completely
+     * @throws \InvalidArgumentException for a malformed code
      */
     public function findByCode(string $airline, string $code): ?array
     {
@@ -72,17 +77,19 @@ final class AirportCache
             preg_match('/^[A-Z0-9]{3}$/', $code) === 1 => 'iata',
             default => throw new \InvalidArgumentException("Airport code '{$code}' must be a 4-letter ICAO or 3-letter IATA code."),
         };
-        $this->ensureFresh($airline);
-        $row = $this->rowByCode($airline, $column, $code);
-        if ($row === null && $this->mayReloadOnMiss($airline)) {
-            $this->reload($airline);
-            $row = $this->rowByCode($airline, $column, $code);
-        }
-        if ($row === null && ($this->reloaded[$airline] ?? true) === false) {
-            throw new RateLimitExceededException("Airport {$code} was not found yet: the airport list could not be loaded completely because the request cap was reached. Try again in a minute.");
+        if ($this->isFresh($airline) && ($row = $this->rowByCode($airline, $column, $code)) !== null) {
+            return $row;
         }
 
-        return $row;
+        $body = $this->client->get($airline, '/airports', ["filter[{$column}]" => $code, 'sort' => 'id', 'page[size]' => 10]);
+        foreach ((array) ($body['data'] ?? []) as $airport) {
+            $airport = (array) $airport;
+            if (isset($airport['id']) && self::code($airport[$column] ?? null) === $code) {
+                return ['id' => (int) $airport['id'], 'icao' => self::code($airport['icao'] ?? null), 'iata' => self::code($airport['iata'] ?? null), 'name' => mb_substr((string) ($airport['name'] ?? ''), 0, 255)];
+            }
+        }
+
+        return null;
     }
 
     /**
@@ -122,12 +129,19 @@ final class AirportCache
 
     private function ensureFresh(string $airline): void
     {
+        if (!isset($this->reloaded[$airline]) && !$this->isFresh($airline)) {
+            $this->reload($airline);
+        }
+    }
+
+    /** The cached list is non-empty and was fully read within the TTL. */
+    private function isFresh(string $airline): bool
+    {
         $stmt = $this->pdo->prepare('SELECT COUNT(*) AS n, MIN(fetched_at) AS oldest FROM airport_cache WHERE airline = :a');
         $stmt->execute(['a' => $airline]);
         $row = (array) $stmt->fetch(\PDO::FETCH_ASSOC);
-        if (!isset($this->reloaded[$airline]) && ((int) ($row['n'] ?? 0) === 0 || Sql::olderThan($row['oldest'] ?? null, $this->ttlSeconds, $this->clock->now()))) {
-            $this->reload($airline);
-        }
+
+        return (int) ($row['n'] ?? 0) > 0 && !Sql::olderThan($row['oldest'] ?? null, $this->ttlSeconds, $this->clock->now());
     }
 
     private function mayReloadOnMiss(string $airline): bool

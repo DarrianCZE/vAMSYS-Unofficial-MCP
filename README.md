@@ -201,14 +201,14 @@ Other clients only work if their redirect host is allowed in `oauth.allowed_redi
 |---|---|
 | `list_airlines` | Lists the configured airline keys (plus name and weight unit). Call this first. |
 | `find_routes` | Finds routes and returns **compact summaries**, never the whole route set. Departure and arrival come back as ICAO codes (`dep`/`arr`, plus `dep_iata`/`arr_iata`). |
-| `count_routes` | Counts routes matching the same filters without listing them, for questions like "how many routes are missing a departure time?". Optional `breakdown`: `tag` (top 15 tags) or `visibility` (hidden vs visible). |
+| `count_routes` | Counts routes matching the same filters without listing them, for questions like "how many routes are missing a departure time?". Optional `breakdown`: `tag` (top 15 tags) or `visibility` (hidden vs visible). With `dep` and/or `arr` it's fast, usually a single request. Without them it reads the airline's whole route set (see *Caching*). |
 
 **Common arguments** (`find_routes` and `count_routes`):
 - `airline` (required)
 - `dep` / `arr`: ICAO or IATA code
 - `tag`: case-sensitive; comma-separated means the route must have all of them
 - `missing_field`: the field is empty, e.g. `departure_time`, `flight_distance`, `remarks`, `fleet_ids`
-- `refresh`: re-read the routes from vAMSYS instead of using the cache
+- `refresh`: don't use the cached route set and read from vAMSYS. With `dep`/`arr` that's a quick filtered read; without them it re-reads the full route set.
 - `limit` (`find_routes` only): 1–50, default 20
 
 **What the result fields mean:**
@@ -218,14 +218,15 @@ Other clients only work if their redirect host is allowed in `oauth.allowed_redi
 | `complete` | `true` when every relevant route was examined. Then `matched` is exact. |
 | `scanned` | How many routes were examined. |
 | `total_routes` | Size of the airline's whole route set. Only present when the full set was read. |
-| `source` | Where the routes came from: `cache` (a recently read full set), `scan` (the full set read now) or `live` (a `find_routes` search that pages through vAMSYS and stops as soon as it has `limit` matches). |
+| `source` | Where the routes came from: `cache` (a recently read full set), `scan` (the full set read now) or `live` (only the routes vAMSYS returns for the airport filters; `find_routes` also stops as soon as it has `limit` matches). |
+| `retry_after_seconds` | Only on a scan that paused at the request cap: when the next call can continue. |
 
 If an airport ID can't be resolved, the output shows `dep_id`/`arr_id` with `dep_unresolved`/`arr_unresolved: true`.
 
 **Caching:**
-- **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h). It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters are resolved from the same cache, so they cost no extra API calls.
-- **Routes:** `count_routes` (and `find_routes` with `refresh: true`) read the airline's **full route set** once and reuse it for `vamsys.route_cache_ttl` (default 10 min).
-- **Large route networks:** a full read stops at the per-airline request cap (it never waits and never goes over) or at `vamsys.scan_time_budget_seconds` (default 20 s, to stay below PHP's time limit). It then returns a partial result with `complete: false`, and the next call continues where it stopped.
+- **Airports:** the airline's airport list is cached (ID → ICAO/IATA/name) for `vamsys.airport_cache_ttl` (default 24 h) and used to show routes with codes. It is reloaded early when a route refers to an unknown airport, at most once every 5 minutes. Airport filters (`dep`/`arr`) are resolved from the same cache. If the cache is empty, expired or doesn't have the code, one filtered `/airports` request looks up just that code; a filter never reloads the whole list.
+- **Routes:** with `dep`/`arr`, both tools ask vAMSYS for just the matching routes. Without them, `count_routes` (and `find_routes` with `refresh: true`) read the airline's **full route set** once and reuse it for `vamsys.route_cache_ttl` (default 10 min). A fresh full set also answers filtered questions, with no API calls.
+- **Large route networks:** a full read stops at the per-airline request cap (it never waits and never goes over) or at `vamsys.scan_time_budget_seconds` (default 20 s, to stay below PHP's time limit). It then returns a partial result with `complete: false` and `retry_after_seconds`, and the next call continues where it stopped. A filtered read has the same limits but isn't saved, so if it pauses (only likely for a very large hub) the next call starts over; giving both `dep` and `arr` keeps it small.
 - **A resumed scan isn't a single snapshot.** Its pages can be read minutes apart, so routes changed in vAMSYS during that time (for example by a bulk import script) may be counted in their old or new state. Avoid counting while bulk route imports are running.
 
 All tools are marked read-only. Outputs are kept small on purpose, because every byte ends up in the AI's context.

@@ -68,8 +68,8 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 
 - Design tools around **questions people ask**, not a 1:1 mirror of endpoints.
 - **Keep outputs small**: compact JSON (`ToolResult::of()`), only the fields needed, empty fields dropped, a `limit` with `has_more`, never full collections.
-- Filter server-side where vAMSYS supports it (`filter[...]`), otherwise while paging, and stop paging once the answer is known.
-- Show airports as ICAO codes, not vAMSYS IDs. Resolve them with `AirportCache` (and airport filter inputs too), never with one `/airports` call per code.
+- Filter server-side where vAMSYS supports it (`filter[...]`), otherwise while paging, and stop paging once the answer is known. Never read an airline's full route set for a question an airport filter can narrow (`RouteFilter::isNarrow()` → `RouteCache::matching()`), unless a fresh cached full set answers it for free.
+- Show airports as ICAO codes, not vAMSYS IDs. Resolve them with `AirportCache`, never with one `/airports` call per route in the output. Airport filter inputs come from the fresh cache, otherwise from one `filter[icao]`/`filter[iata]` request per code (`AirportCache::findByCode`). A filter input never triggers a reload of the whole airport list.
 - Be honest about coverage. Every route result reports:
   - `complete`: every relevant route was examined;
   - `scanned`: how many routes were examined;
@@ -80,10 +80,11 @@ Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-k
 ## Caching rules (hard rules)
 
 - **Every cache fill goes through `VamsysClient`,** and so through the per-airline rate limiter. Counts and full scans included. There is no side channel to vAMSYS.
-- **Full scans** (`RouteCache::get`) call `get(..., maxRateWait: 0)`. At the cap they stop at once and return a partial `RouteSet` (`complete: false`, `stopReason`); they never wait and never exceed the cap. They also stop at `scan_time_budget_seconds`, so PHP's `max_execution_time` is never hit.
+- **Full scans** (`RouteCache::get`) and filtered scans (`RouteCache::matching`) call `get(..., maxRateWait: 0)`. At the cap they stop at once and return a partial `RouteSet` (`complete: false`, `stopReason`, `retryAfterSeconds`); they never wait and never exceed the cap. They also stop at `scan_time_budget_seconds`, so PHP's `max_execution_time` is never hit. Tools report a paused scan's `retry_after_seconds`.
+- **Filtered scans are not cached and not resumable;** their `RouteSet` has `filtered: true`, and tools never report `total_routes` for it.
 - **Progress is saved** (routes so far + cursor) and the next call resumes within `route_cache_ttl`. Never discard progress just because a call was cut short.
 - **A partial route set is never served as complete,** and never cached as complete.
-- **`airport_cache`** is reloaded when it's older than `airport_cache_ttl`, or on a miss at most once per request. A miss reload only happens if the last load was more than 5 minutes ago. A reload cut short keeps its rows; stale rows are deleted only after a complete reload.
+- **`airport_cache`** is reloaded when it's older than `airport_cache_ttl`, or on an ID miss at most once per request. A miss reload only happens if the last load was more than 5 minutes ago. Single-code lookups (`findByCode`) are never written to the cache, because its freshness is judged by full reloads only. A reload cut short keeps its rows; stale rows are deleted only after a complete reload.
 - **No surrounding transactions.** Don't wrap API-calling code in a DB transaction: the rate limiter opens its own transaction per request, and PDO can't nest them.
 - **The route cache stores only `RouteRecord::project()` output.** Never internal remarks, SimBrief options or other bulk fields.
 - Annotate every v1 tool with `readOnlyHint: true`.

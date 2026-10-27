@@ -161,6 +161,7 @@ final class VamsysClient
         if ($status === 429) {
             throw new RateLimitExceededException(
                 "vAMSYS answered HTTP 429 for GET {$path}: the airline's 100 requests/minute limit (shared by all its OAuth clients) is exhausted. Try again in a minute.",
+                60,
             );
         }
 

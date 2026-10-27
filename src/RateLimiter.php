@@ -60,13 +60,14 @@ final class RateLimiter
             // Sleep slightly past the boundary so the next attempt lands in the new window.
             $sleepFor = $secondsLeft + 0.05;
             if ($waited + $sleepFor > $maxWait) {
+                $retryAfter = max(1, (int) ceil($secondsLeft));
                 throw new RateLimitExceededException(sprintf(
                     "Request cap of %d requests/minute for airline '%s' reached (the vAMSYS limit is shared with "
                     . 'all other OAuth clients of this airline). Try again in about %d seconds.',
                     $cap,
                     $airline,
-                    max(1, (int) ceil($secondsLeft)),
-                ));
+                    $retryAfter,
+                ), $retryAfter);
             }
             ($this->sleep)($sleepFor);
             $waited += $sleepFor;

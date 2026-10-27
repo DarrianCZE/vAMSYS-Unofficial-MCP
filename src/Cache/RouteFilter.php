@@ -42,6 +42,15 @@ final class RouteFilter
     }
 
     /**
+     * An airport filter is set, so vAMSYS returns a small set and reading it
+     * directly beats reading the airline's full route set.
+     */
+    public function isNarrow(): bool
+    {
+        return $this->departureId !== null || $this->arrivalId !== null;
+    }
+
+    /**
      * Equivalent vAMSYS query filters, for live (uncached) scans.
      *
      * @return array<string, string>
