@@ -1,0 +1,8 @@
+/vendor/
+/config/config.php
+/var/
+/.phpunit.cache/
+.env
+/dist/
+/release.json
+/manifest.json

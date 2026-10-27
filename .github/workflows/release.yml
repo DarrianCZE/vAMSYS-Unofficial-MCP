@@ -1,0 +1,47 @@
+# Builds, signs and publishes a release when a tag like v1.2.3 is pushed.
+# Needs the repository secret RELEASE_SIGNING_KEY (see bin/release-keygen.php).
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.4'
+          extensions: sodium, zip, pdo_sqlite
+          coverage: none
+
+      - name: Install dependencies and run tests
+        run: |
+          composer install --no-interaction --prefer-dist
+          vendor/bin/phpunit
+
+      - name: Check that the tag matches App::VERSION
+        run: |
+          version=$(php -r 'require "vendor/autoload.php"; echo VamsysMcp\App::VERSION;')
+          test "v${version}" = "${GITHUB_REF_NAME}" || { echo "Tag ${GITHUB_REF_NAME} != App::VERSION ${version}"; exit 1; }
+
+      - name: Build package (production dependencies only)
+        run: |
+          composer install --no-dev --optimize-autoloader --no-interaction --prefer-dist
+          php bin/build-release.php
+
+      - name: Sign package
+        env:
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: php bin/sign-release.php "dist/vamsys-mcp-${GITHUB_REF_NAME#v}.zip"
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.zip dist/*.zip.sig --title "${GITHUB_REF_NAME}" --generate-notes

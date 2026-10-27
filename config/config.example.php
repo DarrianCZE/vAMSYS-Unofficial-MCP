@@ -1,0 +1,79 @@
+<?php
+
+declare(strict_types=1);
+
+/*
+ * Easiest: let the installer write config/config.php for you (open
+ * https://your-host/setup.php, or run php bin/install.php). This file
+ * documents every option for a hand-written config.
+ *
+ * By hand: copy to config/config.php (git-ignored) and fill in. Keep this directory
+ * OUTSIDE the web root and readable only by your PHP user (chmod 600).
+ * A hand-written config (without the installer's marker line) is never
+ * overwritten by the installer or the web admin.
+ *
+ * Secrets can come from environment variables instead of being written here,
+ * e.g. 'client_secret' => getenv('VAMSYS_SWV_CLIENT_SECRET') ?: ''.
+ * Secrets are never stored in the database.
+ */
+
+return [
+    'database' => [
+        // MariaDB 11 / MySQL 8. The user needs only SELECT, INSERT, UPDATE, DELETE.
+        'dsn' => 'mysql:host=localhost;dbname=vamsys_mcp;charset=utf8mb4',
+        'username' => 'vamsys_mcp',
+        'password' => getenv('VAMSYS_MCP_DB_PASSWORD') ?: 'change-me',
+    ],
+
+    'airlines' => [
+        // The key ("swv") is what MCP clients pass as the airline argument.
+        'swv' => [
+            'name' => 'Example Virtual',
+            'client_id' => '123',                       // vAMSYS Operations API OAuth client ID
+            'client_secret' => getenv('VAMSYS_SWV_CLIENT_SECRET') ?: 'change-me',
+            'weight_unit' => 'kg',                      // 'kg' or 'lbs'; sent on every /routes call
+            'rate_cap' => 60,                           // requests/minute this server may use (vAMSYS limit: 100, shared by ALL your OAuth clients)
+            'pilots_api' => false,                      // keep false unless you really need pilot data
+        ],
+    ],
+
+    'vamsys' => [
+        'api_base_url' => 'https://vamsys.io/api/v3/operations',
+        'token_url' => 'https://vamsys.io/oauth/token',
+        'page_size' => 100,                    // page[size] for paginated lists
+        'max_pages_per_call' => 10,            // upper bound of pages one tool call may fetch
+        'max_rate_wait_seconds' => 10,         // wait this long for the next rate window before failing; keep below PHP's max_execution_time
+        'token_refresh_margin_seconds' => 300, // refresh cached tokens this long before they expire
+        'http_timeout_seconds' => 20,
+    ],
+
+    // Log every outgoing vAMSYS call (airline, path, status, duration) to call_log.
+    'audit_log' => false,
+
+    // Only used by the HTTP endpoint (public/index.php).
+    'http' => [
+        // Host names this endpoint is served under (DNS-rebinding protection).
+        'allowed_hosts' => ['mcp.example.com'],
+        // SHA-256 hashes of accepted bearer tokens. Generate with: php bin/generate-token.php
+        'bearer_token_sha256' => [],
+        // Session files for clients on the older, handshake-based protocol. Must be outside the web root.
+        'session_dir' => dirname(__DIR__) . '/var/sessions',
+    ],
+
+    // Web admin at /setup.php (settings, access tokens, FTP, updates).
+    'admin' => [
+        // password_hash() of the admin password. Remove it to reset the password with a setup key.
+        'password_hash' => '',
+        // false = setup.php answers 404 (manage everything via this file and bin/*.php).
+        'web_enabled' => true,
+    ],
+
+    // Key for secrets stored encrypted in the database (FTP login for updates).
+    // Generate: php -r "echo base64_encode(random_bytes(32));"   Changing it makes stored FTP credentials unreadable.
+    'app_key' => '',
+
+    // GitHub repository whose signed releases the updater installs.
+    'update' => [
+        'repository' => 'DarrianCZE/vAMSYS-Unofficial-MCP',
+    ],
+];

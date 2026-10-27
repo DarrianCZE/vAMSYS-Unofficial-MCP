@@ -1,0 +1,43 @@
+{
+    "name": "vamsys-unofficial/mcp-server",
+    "description": "Unofficial, self-hosted, read-only MCP server for the vAMSYS Operations API.",
+    "type": "project",
+    "license": "Apache-2.0",
+    "require": {
+        "php": "^8.4",
+        "laminas/laminas-httphandlerrunner": "^2.14",
+        "mcp/sdk": "^0.9.0",
+        "nyholm/psr7": "^1.8",
+        "symfony/http-client": "^8.0"
+    },
+    "suggest": {
+        "ext-sodium": "Required for encrypted settings and for verifying signed updates",
+        "ext-zip": "Required to install updates from the web admin or bin/update.php",
+        "ext-ftp": "Required for updates on hosts where PHP cannot write its own files"
+    },
+    "autoload": {
+        "psr-4": {
+            "VamsysMcp\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "VamsysMcp\\Tests\\": "tests/"
+        }
+    },
+    "config": {
+        "platform": {
+            "php": "8.4.0"
+        },
+        "sort-packages": true,
+        "allow-plugins": {
+            "php-http/discovery": false
+        }
+    },
+    "scripts": {
+        "test": "phpunit"
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^12.5"
+    }
+}

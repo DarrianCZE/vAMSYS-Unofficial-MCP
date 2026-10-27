@@ -1,0 +1,12 @@
+# Apache + PHP-FPM often drop the Authorization header; pass it on to PHP.
+<IfModule mod_rewrite.c>
+    RewriteEngine On
+    RewriteCond %{HTTP:Authorization} .
+    RewriteRule .* - [E=HTTP_AUTHORIZATION:%{HTTP:Authorization}]
+
+    # Send every request to index.php (the MCP endpoint).
+    RewriteCond %{REQUEST_FILENAME} !-f
+    RewriteRule ^ index.php [L]
+</IfModule>
+
+Options -Indexes
