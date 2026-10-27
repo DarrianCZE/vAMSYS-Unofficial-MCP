@@ -31,7 +31,7 @@ A self-hosted **MCP server in PHP** that sits in front of the **vAMSYS Operation
 bin/server-stdio.php      STDIO entry point (local clients, Inspector)
 bin/install.php           interactive CLI installer / reconfiguration (same logic as the web installer)
 bin/update.php            CLI updater (same logic as the web updater)
-bin/generate-token.php    creates an HTTP bearer token + its SHA-256 hash
+bin/mcp-user.php          manage MCP users (who may sign in when connecting a client)
 bin/build-release.php, bin/sign-release.php, bin/release-keygen.php   release tooling (CI)
 public/index.php          Streamable HTTP entry point (PHP-FPM, one request per run); 503 while var/maintenance exists
 public/setup.php          web installer + admin UI; loads the staged code while an update is active
@@ -48,7 +48,9 @@ src/
   TokenStore.php          OAuth token fetch + DB cache
   VamsysClient.php        read-only GET client; enforces the API rules above
   CallLog.php             optional audit log (path + status only)
-  Http/BearerAuthMiddleware.php   v1 HTTP auth (static bearer token, hashed in config)
+  OAuth/                  built-in OAuth 2.1 authorization server: OAuthService (codes, tokens, PKCE, rotation),
+                          ClientRegistry (DCR + Client ID Metadata Documents), ClientMetadataFetcher (SSRF-safe),
+                          RedirectPolicy, McpUsers, TokenValidator (plugs into the SDK's AuthorizationMiddleware), OAuthApp (HTTP)
   Tools/                  one class per MCP tool (+ ToolResult for compact output)
   Exception/              VamsysMcpException and subclasses: messages are safe to show to clients
   Install/                ConfigFile (writes config.php), InstallService, Migrator, SecretBox + EncryptedSettings, OwnershipProof, Console
@@ -57,7 +59,9 @@ src/
 tests/                    PHPUnit; SQLite DB, fake PSR-18 HTTP client, fake clock, temp dirs
 ```
 
-HTTP transport: `Server::builder()->build()` serves both protocol eras. Clients on `2026-07-28` are stateless. Older handshake clients get sessions in `FileSessionStore` + `FileSessionLock` (directory outside the web root). Middleware: `CorsMiddleware` (no browser origins), `DnsRebindingProtectionMiddleware` (`http.allowed_hosts`), `BearerAuthMiddleware`.
+HTTP transport: `Server::builder()->build()` serves both protocol eras. Clients on `2026-07-28` are stateless. Older handshake clients get sessions in `FileSessionStore` + `FileSessionLock` (directory outside the web root). Middleware: `CorsMiddleware` (no browser origins), `DnsRebindingProtectionMiddleware` (`http.allowed_hosts`), and the SDK's `AuthorizationMiddleware` with our `TokenValidator`.
+
+Routing in `public/index.php`: `/mcp` (recommended) and `/` serve MCP; `/.well-known/oauth-authorization-server`, `/.well-known/oauth-protected-resource[/mcp]` and `/oauth/{authorize,token,register}` go to `OAuthApp`; everything else is 404. The site must be served at the root of its (sub)domain.
 
 ## Designing tools
 
@@ -74,7 +78,30 @@ HTTP transport: `Server::builder()->build()` serves both protocol eras. Clients 
 - The DB admin login used for migrations is asked for when needed and **never stored**.
 - The DB otherwise stores only cached access tokens, rate-window rows, login-throttle rows and the optional call log.
 - Never put tokens, secrets, request headers, token-response bodies or DSNs into exception messages, logs, or tool output. `CallLog` records the path only (no query string). `public/index.php` logs only the exception class.
-- The HTTP bearer token is stored as a SHA-256 hash and compared with `hash_equals()`.
+- MCP users' passwords are stored with `password_hash()`. OAuth codes, access and refresh tokens are random 256-bit strings stored only as SHA-256 hashes.
+
+## OAuth (hard rules)
+
+Since 0.2.0 the HTTP endpoint is protected **only** by OAuth; there are no static tokens.
+
+- **Requirements Claude enforces.** Do not regress any of them:
+  - a `401` with `WWW-Authenticate: Bearer resource_metadata="…"`;
+  - protected-resource metadata whose `resource` equals the URL the user enters (`/mcp`, or the root);
+  - authorization-server metadata advertising `code_challenge_methods_supported: ["S256"]`, `token_endpoint_auth_methods_supported: ["none"]` and `client_id_metadata_document_supported: true`, plus a `registration_endpoint`;
+  - a form-urlencoded `/oauth/token`;
+  - RFC 6749 error codes (`invalid_grant` for bad refresh tokens);
+  - rotating refresh tokens;
+  - responses within 10 s.
+- **PKCE S256 is mandatory; public clients only.** Never add `plain`, implicit or password grants, or client secrets.
+- **Redirects:**
+  - Only to hosts in `oauth.allowed_redirect_hosts` (default `claude.ai`, `localhost`, `127.0.0.1`).
+  - Loopback URIs match on any port.
+  - Errors about the client or the redirect URI are shown on the page, never redirected.
+  - The consent page shows the redirect host.
+  - Its CSP `form-action` allows exactly that request's redirect origin.
+- **Client ID Metadata Documents are fetched SSRF-safely:** https only, no redirects, 64 KB cap, public IPs only, and the connection is pinned to the checked IP. Keep it that way.
+- **Refresh-token reuse revokes the whole grant**, and so does a replayed authorization code. Disabling or deleting an MCP user revokes their tokens.
+- **MCP users are not admins.** The OAuth sign-in never accepts the admin password, and MCP users never get access to `setup.php`.
 
 ## Installer, admin UI and updates (hard rules)
 

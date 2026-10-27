@@ -14,14 +14,14 @@ final class Session
 {
     private const int IDLE_TIMEOUT = 1800;
 
-    public static function start(Paths $paths, bool $https): void
+    public static function start(Paths $paths, bool $https, string $name = 'vamsys_admin', ?string $cookiePath = null): void
     {
         $dir = $paths->ensureVarDir('admin-sessions');
         session_save_path($dir);
-        session_name('vamsys_admin');
+        session_name($name);
         session_set_cookie_params([
             'lifetime' => 0,
-            'path' => rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? '/'), '/\\') . '/',
+            'path' => $cookiePath ?? rtrim(dirname($_SERVER['SCRIPT_NAME'] ?? '/'), '/\\') . '/',
             'secure' => $https,
             'httponly' => true,
             'samesite' => 'Strict',

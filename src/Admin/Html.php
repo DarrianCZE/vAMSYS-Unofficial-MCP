@@ -27,7 +27,7 @@ final class Html
         foreach ($flashes as [$type, $message]) {
             $flashHtml .= '<div class="flash ' . self::e($type) . '">' . self::e($message) . '</div>';
         }
-        $navHtml = $nav ? '<nav><a href="?p=dashboard">Dashboard</a><a href="?p=settings">Settings</a><a href="?p=tokens">Access tokens</a>'
+        $navHtml = $nav ? '<nav><a href="?p=dashboard">Dashboard</a><a href="?p=settings">Settings</a><a href="?p=users">MCP users</a>'
             . '<a href="?p=ftp">FTP</a><a href="?p=update">Updates</a>'
             . '<form method="post" action="?a=logout" class="inline">' . $this->csrfField() . '<button class="link">Log out</button></form></nav>' : '';
         $version = self::e(App::VERSION);
@@ -51,7 +51,7 @@ final class Html
             table{border-collapse:collapse;width:100%;background:#fff}td,th{border:1px solid #d8dbe2;padding:.35rem .5rem;text-align:left;vertical-align:top}
             .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:0 1rem}.hidden{display:none}progress{width:100%}
             </style></head><body>
-            <header><h1>vAMSYS MCP admin</h1><small>v{$version} · unofficial, not affiliated with vAMSYS</small></header>
+            <header><h1>vAMSYS MCP</h1><small>v{$version} · unofficial, not affiliated with vAMSYS</small></header>
             {$navHtml}{$flashHtml}<h2>{$this->e($title)}</h2>
             {$body}
             </body></html>

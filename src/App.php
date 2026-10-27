@@ -21,15 +21,31 @@ use VamsysMcp\Tools\ListAirlinesTool;
 final class App
 {
     public const string NAME = 'vamsys-unofficial-mcp';
-    public const string VERSION = '0.1.1';
+    public const string VERSION = '0.2.0';
     /** Oldest installed version that may auto-update to this one (raise it when an update cannot be applied in place). */
     public const string UPDATE_FROM_MIN = '0.1.0';
     public const string REQUIRES_PHP = '8.4.0';
 
     private function __construct(
         public readonly Config $config,
+        public readonly \PDO $pdo,
         private readonly VamsysClient $client,
     ) {
+    }
+
+    /** OAuth authorization server for the HTTP endpoint (see src/OAuth). */
+    public static function oauth(Config $config, \PDO $pdo): OAuth\OAuthService
+    {
+        $clock = new SystemClock();
+        $users = new OAuth\McpUsers($pdo);
+        $clients = new OAuth\ClientRegistry(
+            $pdo,
+            new OAuth\ClientMetadataFetcher(HttpClient::create()),
+            new OAuth\RedirectPolicy($config->oauthRedirectHosts),
+            $clock,
+        );
+
+        return new OAuth\OAuthService($pdo, $clients, $users, $clock, $config->baseUrl(), $config->resourceUrls(), $config->oauthAccessTokenTtl, $config->oauthRefreshTokenTtl);
     }
 
     /** Config path: $VAMSYS_MCP_CONFIG, else <project>/config/config.php. */
@@ -55,7 +71,7 @@ final class App
         $tokens = new TokenStore($pdo, $http, $psr17, $psr17, $rateLimiter, $clock, $config->tokenUrl, $config->tokenRefreshMarginSeconds);
         $callLog = $config->auditLog ? new CallLog($pdo, $clock) : null;
 
-        return new self($config, new VamsysClient($config, $tokens, $rateLimiter, $http, $psr17, $callLog));
+        return new self($config, $pdo, new VamsysClient($config, $tokens, $rateLimiter, $http, $psr17, $callLog));
     }
 
     public function serverBuilder(): Builder

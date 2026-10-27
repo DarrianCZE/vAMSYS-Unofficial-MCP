@@ -11,21 +11,26 @@ namespace VamsysMcp\Admin;
 final class LoginThrottle
 {
     private const int WINDOW = 900;
-    private const int PER_IP = 5;
-    private const int GLOBAL = 25;
 
-    public function __construct(private readonly \PDO $pdo)
-    {
+    /**
+     * @param string $prefix keeps separate counters per purpose (admin login, MCP sign-in, client registration)
+     */
+    public function __construct(
+        private readonly \PDO $pdo,
+        private readonly string $prefix = '',
+        private readonly int $perIp = 5,
+        private readonly int $global = 25,
+    ) {
     }
 
     public function isBlocked(string $ip): bool
     {
-        return $this->count($this->ipBucket($ip)) >= self::PER_IP || $this->count('global') >= self::GLOBAL;
+        return $this->count($this->ipBucket($ip)) >= $this->perIp || $this->count($this->prefix . 'global') >= $this->global;
     }
 
     public function recordFailure(string $ip): void
     {
-        foreach ([$this->ipBucket($ip), 'global'] as $bucket) {
+        foreach ([$this->ipBucket($ip), $this->prefix . 'global'] as $bucket) {
             $window = gmdate('Y-m-d H:i:s', intdiv(time(), self::WINDOW) * self::WINDOW);
             $sql = match ($this->pdo->getAttribute(\PDO::ATTR_DRIVER_NAME)) {
                 'mysql' => 'INSERT INTO admin_throttle (bucket, window_start, attempts) VALUES (:b, :w, 1)
@@ -58,6 +63,6 @@ final class LoginThrottle
 
     private function ipBucket(string $ip): string
     {
-        return 'ip:' . substr(hash('sha256', $ip), 0, 40);
+        return $this->prefix . 'ip:' . substr(hash('sha256', $ip), 0, 40);
     }
 }

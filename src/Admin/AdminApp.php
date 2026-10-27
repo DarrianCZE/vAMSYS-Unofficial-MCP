@@ -17,6 +17,7 @@ use VamsysMcp\Install\InstallService;
 use VamsysMcp\Install\Migrator;
 use VamsysMcp\Install\OwnershipProof;
 use VamsysMcp\Install\SecretBox;
+use VamsysMcp\OAuth\McpUsers;
 use VamsysMcp\Paths;
 use VamsysMcp\Update\FtpFileWriter;
 use VamsysMcp\Update\GitHubReleases;
@@ -132,9 +133,12 @@ final class AdminApp
             }
             if ($errors === []) {
                 try {
-                    $result = $this->installer()->install($raw, $this->ddlInput(), (bool) $input['verify_airlines'], $ftp);
+                    $mcpUser = (array) ($_POST['mcp_user'] ?? []);
+                    $result = $this->installer()->install($raw, $this->ddlInput(), (bool) $input['verify_airlines'], $ftp, [
+                        'username' => (string) ($mcpUser['username'] ?? ''), 'password' => (string) ($mcpUser['password'] ?? ''),
+                    ]);
                     Session::login();
-                    $this->send(200, 'Installed', $this->installedPage($raw, $result['http_token']));
+                    $this->send(200, 'Installed', $this->installedPage($raw, $result['mcp_user']));
 
                     return;
                 } catch (VamsysMcpException $e) {
@@ -153,6 +157,9 @@ final class AdminApp
             . '<fieldset><legend>Web admin password</legend>'
             . $this->html->input('Password (at least ' . InstallService::MIN_ADMIN_PASSWORD_LENGTH . ' characters)', 'admin_password', '', 'password')
             . $this->html->input('Repeat password', 'admin_password_confirm', '', 'password') . '</fieldset>'
+            . '<fieldset><legend>First MCP user</legend><p class="help">The person who signs in when connecting Claude (or another MCP client). Separate from the admin password; add more users later under MCP users.</p>'
+            . '<div class="grid">' . $this->html->input('User name', 'mcp_user[username]', (string) ($_POST['mcp_user']['username'] ?? ''))
+            . $this->html->input('Password (at least ' . McpUsers::MIN_PASSWORD_LENGTH . ' characters)', 'mcp_user[password]', '', 'password') . '</div></fieldset>'
             . $this->ftpFieldset(null, 'Optional. Only needed if PHP cannot write the installation files itself; you can add it later. Stored encrypted.')
             . '<button>Install</button></form>' . $this->airlineTemplateScript();
         $this->send(200, 'Install', $body);
@@ -161,18 +168,22 @@ final class AdminApp
     /**
      * @param array<string, mixed> $raw
      */
-    private function installedPage(array $raw, ?string $token): string
+    private function installedPage(array $raw, ?string $mcpUser): string
     {
-        $host = (string) ($raw['http']['allowed_hosts'][0] ?? $this->requestHost());
-        $tokenHtml = $token !== null
-            ? '<p>MCP access token (shown <strong>only once</strong>; copy it now):</p><pre>' . Html::e($token) . '</pre>'
-            : '';
+        $url = Config::fromArray($raw)->baseUrl() . '/mcp';
 
         return '<div class="flash ok">Installation complete. Secrets were saved to config.php outside the web root.</div>'
-            . $tokenHtml
-            . '<p>MCP endpoint: <code>https://' . Html::e($host) . '/</code>. Send the header <code>Authorization: Bearer &lt;token&gt;</code>.</p>'
-            . '<p>Claude Code: <code>claude mcp add --transport http vamsys https://' . Html::e($host) . '/ --header "Authorization: Bearer &lt;token&gt;"</code></p>'
+            . ($mcpUser === null ? '<div class="flash warn">No MCP user yet: create one under MCP users before connecting Claude.</div>' : '')
+            . $this->connectHelp($url)
             . '<p><a class="button" href="?p=dashboard">Go to the dashboard</a></p>';
+    }
+
+    private function connectHelp(string $url): string
+    {
+        return '<h3>Connecting Claude</h3><p>MCP server URL: <code>' . Html::e($url) . '</code></p>'
+            . '<ul><li><strong>claude.ai / Claude Desktop:</strong> Customize → Connectors → Add custom connector, paste the URL, keep the default sign-in. '
+            . 'Claude opens this server\'s sign-in page; log in with an MCP user and click Allow.</li>'
+            . '<li><strong>Claude Code:</strong> <code>claude mcp add --transport http vamsys ' . Html::e($url) . '</code>, then <code>/mcp</code> in Claude Code to sign in.</li></ul>';
     }
 
     /**
@@ -301,8 +312,7 @@ final class AdminApp
         match ($action) {
             'logout' => $this->logout(),
             'save-settings' => $this->saveSettings($raw),
-            'token-create' => $this->createToken($raw),
-            'token-revoke' => $this->revokeToken($raw),
+            'user-add', 'user-disable', 'user-enable', 'user-password', 'user-delete', 'grant-revoke' => $this->userAction($raw, $action),
             'ftp-save', 'ftp-test' => $this->saveFtp($raw, $action === 'ftp-test'),
             'ftp-delete' => $this->deleteFtp($raw),
             'update-check' => $this->checkUpdate($raw),
@@ -310,7 +320,7 @@ final class AdminApp
             'update-step', 'update-rollback', 'update-retry', 'update-cancel' => $this->updateStep($raw, $action),
             null => match ($page) {
                 'settings' => $this->settingsPage($raw),
-                'tokens' => $this->tokensPage($raw),
+                'users' => $this->usersPage($raw),
                 'ftp' => $this->ftpPage($raw),
                 'update' => $this->updatePage($raw),
                 default => $this->dashboard($raw),
@@ -348,7 +358,10 @@ final class AdminApp
             $airlines[] = sprintf('%s (%s, %s, cap %d/min%s)', $key, $a['name'] ?? $key, $a['weight_unit'] ?? '?', $a['rate_cap'] ?? 60, !empty($a['pilots_api']) ? ', Pilots API ON' : '');
         }
         $rows['Airlines'] = implode('; ', $airlines);
-        $rows['MCP endpoint'] = 'https://' . ($raw['http']['allowed_hosts'][0] ?? '?') . '/ (' . count((array) ($raw['http']['bearer_token_sha256'] ?? [])) . ' access token(s))';
+        $rows['MCP endpoint'] = Config::fromArray($raw)->baseUrl() . '/mcp (OAuth sign-in)';
+        if (isset($pdo) && ($pending ?? []) === []) {
+            $rows['MCP users'] = sprintf('%d user(s), %d active connection(s)', count((new McpUsers($pdo))->all()), count(App::oauth(Config::fromArray($raw), $pdo)->activeGrants()));
+        }
         if (is_file($this->paths->maintenanceFlag())) {
             $rows['Maintenance'] = 'ON: an update is in progress or was interrupted; see Updates.';
         }
@@ -420,44 +433,79 @@ final class AdminApp
     /**
      * @param array<string, mixed> $raw
      */
-    private function tokensPage(array $raw, ?string $newToken = null): void
+    private function usersPage(array $raw): void
     {
-        $body = $newToken !== null
-            ? '<div class="flash ok">New access token (shown <strong>only once</strong>, copy it now):</div><pre>' . Html::e($newToken) . '</pre>'
-            : '';
-        $body .= '<p>MCP clients send <code>Authorization: Bearer &lt;token&gt;</code>. Only SHA-256 hashes are stored; a lost token cannot be recovered, create a new one.</p><table><tr><th>Token ID (hash prefix)</th><th></th></tr>';
-        foreach ((array) ($raw['http']['bearer_token_sha256'] ?? []) as $hash) {
-            $id = substr((string) $hash, 0, 12);
-            $body .= '<tr><td><code>' . Html::e($id) . '</code></td><td><form method="post" action="?a=token-revoke" class="inline">' . $this->html->csrfField()
-                . '<input type="hidden" name="id" value="' . Html::e($id) . '"><button class="danger">Revoke</button></form></td></tr>';
+        $config = Config::fromArray($raw);
+        $pdo = $config->createPdo();
+        if ((new Migrator($this->paths->migrationsDir()))->pending($pdo) !== []) {
+            $this->send(200, 'MCP users', '<div class="flash warn">The database needs new tables first. Open <a href="?p=settings">Settings</a>, enter a DB admin login at the bottom and save.</div>');
+
+            return;
         }
-        $body .= '</table><form method="post" action="?a=token-create">' . $this->html->csrfField() . '<p><button>Create new token</button></p></form>';
-        $this->send(200, 'Access tokens', $body);
+        $csrf = $this->html->csrfField();
+        $button = static fn (string $action, int|string $id, string $label, string $class = 'secondary', string $idField = 'id'): string => '<form method="post" action="?a=' . $action . '" class="inline">' . $csrf
+            . '<input type="hidden" name="' . $idField . '" value="' . Html::e($id) . '"><button class="' . $class . '">' . Html::e($label) . '</button></form> ';
+
+        $body = '<p>MCP users sign in on this server\'s OAuth page when someone connects Claude (or another MCP client). They get read-only access to the vAMSYS data, not to this admin page.</p>'
+            . '<table><tr><th>User</th><th>Status</th><th>Last sign-in</th><th></th></tr>';
+        foreach ((new McpUsers($pdo))->all() as $u) {
+            $body .= '<tr><td>' . Html::e($u['username']) . '</td><td>' . ($u['disabled'] ? 'disabled' : 'active') . '</td><td>' . Html::e($u['last_login_at'] ?? 'never') . '</td><td>'
+                . ($u['disabled'] ? $button('user-enable', $u['id'], 'Enable') : $button('user-disable', $u['id'], 'Disable'))
+                . $button('user-delete', $u['id'], 'Delete', 'danger')
+                . '<form method="post" action="?a=user-password" class="inline">' . $csrf . '<input type="hidden" name="id" value="' . $u['id'] . '">'
+                . '<input type="password" name="password" placeholder="new password" autocomplete="new-password"> <button class="secondary">Set password</button></form>'
+                . '</td></tr>';
+        }
+        $body .= '</table><form method="post" action="?a=user-add"><fieldset><legend>Add MCP user</legend>' . $csrf . '<div class="grid">'
+            . $this->html->input('User name', 'username') . $this->html->input('Password (at least ' . McpUsers::MIN_PASSWORD_LENGTH . ' characters)', 'password', '', 'password')
+            . '</div><button>Add user</button></fieldset></form>';
+
+        $body .= '<h3>Active connections</h3><table><tr><th>Client</th><th>User</th><th>Connected</th><th>Last token refresh</th><th></th></tr>';
+        foreach (App::oauth($config, $pdo)->activeGrants() as $g) {
+            $body .= '<tr><td>' . Html::e($g['client_name'] ?? '?') . '</td><td>' . Html::e($g['username'] ?? '?') . '</td><td>' . Html::e($g['connected_at']) . '</td><td>'
+                . Html::e($g['last_refresh']) . '</td><td>' . $button('grant-revoke', (string) $g['grant_id'], 'Revoke', 'danger', 'grant') . '</td></tr>';
+        }
+        $body .= '</table><p class="help">Times are UTC. Revoking ends the connection immediately; the client has to sign in again.</p>'
+            . $this->connectHelp($config->baseUrl() . '/mcp');
+        $this->send(200, 'MCP users', $body);
     }
 
     /**
      * @param array<string, mixed> $raw
      */
-    private function createToken(array $raw): void
+    private function userAction(array $raw, string $action): void
     {
-        $token = bin2hex(random_bytes(32));
-        $raw['http']['bearer_token_sha256'][] = hash('sha256', $token);
-        $this->configFile->write($raw);
-        $this->tokensPage($raw, $token);
-    }
-
-    /**
-     * @param array<string, mixed> $raw
-     */
-    private function revokeToken(array $raw): void
-    {
-        $id = (string) ($_POST['id'] ?? '');
-        $raw['http']['bearer_token_sha256'] = array_values(array_filter(
-            (array) ($raw['http']['bearer_token_sha256'] ?? []),
-            static fn ($h): bool => $id === '' || !str_starts_with((string) $h, $id),
-        ));
-        $this->configFile->write($raw);
-        $this->redirect('?p=tokens', 'ok', 'Token revoked.' . ($raw['http']['bearer_token_sha256'] === [] ? ' No tokens left: the MCP endpoint now refuses all requests.' : ''));
+        $config = Config::fromArray($raw);
+        $pdo = $config->createPdo();
+        $users = new McpUsers($pdo);
+        $id = (int) ($_POST['id'] ?? 0);
+        $password = (string) ($_POST['password'] ?? '');
+        switch ($action) {
+            case 'user-add':
+                $users->create((string) ($_POST['username'] ?? ''), $password);
+                $message = 'User added.';
+                break;
+            case 'user-disable':
+                $users->setDisabled($id, true);
+                $message = 'User disabled; their connections were revoked.';
+                break;
+            case 'user-enable':
+                $users->setDisabled($id, false);
+                $message = 'User enabled.';
+                break;
+            case 'user-password':
+                $users->setPassword($id, $password);
+                $message = 'Password changed.';
+                break;
+            case 'user-delete':
+                $users->delete($id);
+                $message = 'User deleted; their connections were revoked.';
+                break;
+            default:
+                App::oauth($config, $pdo)->revokeGrant((string) ($_POST['grant'] ?? ''));
+                $message = 'Connection revoked.';
+        }
+        $this->redirect('?p=users', 'ok', $message);
     }
 
     /**

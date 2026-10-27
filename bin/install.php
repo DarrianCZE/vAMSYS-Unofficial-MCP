@@ -15,6 +15,7 @@ use VamsysMcp\Install\ConfigFile;
 use VamsysMcp\Install\Console;
 use VamsysMcp\Install\FtpCredentials;
 use VamsysMcp\Install\InstallService;
+use VamsysMcp\OAuth\McpUsers;
 use VamsysMcp\Paths;
 
 require dirname(__DIR__) . '/vendor/autoload.php';
@@ -93,8 +94,16 @@ if ($io->confirm('Save FTP credentials (encrypted) for web updates? Only needed 
 }
 $verify = $io->confirm('Verify the vAMSYS credentials now (one token request per airline)?', true);
 
+$mcpUser = null;
+if ($fresh || $io->confirm('Add an MCP user (someone who may connect Claude)?')) {
+    $mcpUser = [
+        'username' => $io->ask('MCP user name (signs in when connecting Claude)'),
+        'password' => $io->secret('MCP user password (at least ' . McpUsers::MIN_PASSWORD_LENGTH . ' characters)'),
+    ];
+}
+
 try {
-    $result = $installer->install($raw, $ddl, $verify, $ftp);
+    $result = $installer->install($raw, $ddl, $verify, $ftp, $mcpUser);
 } catch (VamsysMcpException $e) {
     $io->line("✗ {$e->getMessage()}");
     exit(1);
@@ -102,10 +111,10 @@ try {
 
 $io->line();
 $io->line('✓ Saved ' . $configFile->path . ($result['migrated'] !== [] ? '; database migrations applied: ' . implode(', ', $result['migrated']) : ''));
-if ($result['http_token'] !== null) {
-    $io->line('MCP access token (shown only once; clients send "Authorization: Bearer <token>"):');
-    $io->line('  ' . $result['http_token']);
+if ($result['mcp_user'] !== null) {
+    $io->line("✓ MCP user '{$result['mcp_user']}' created.");
 }
+$io->line('MCP server URL for Claude: ' . VamsysMcp\Config::fromArray($raw)->baseUrl() . '/mcp (sign in with an MCP user when connecting).');
 
 /**
  * @param array<string, mixed> $current

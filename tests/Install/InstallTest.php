@@ -84,6 +84,36 @@ final class InstallTest extends TestCase
         }
     }
 
+    public function testMigrationsNeverReuseATableName(): void
+    {
+        // 0.2.0 almost created a second "oauth_token" table; IF NOT EXISTS would have hidden it.
+        $owner = [];
+        foreach ((new Migrator(dirname(__DIR__, 2) . '/migrations'))->available() as $version => $file) {
+            preg_match_all('/CREATE TABLE IF NOT EXISTS (\w+)/', (string) file_get_contents($file), $m);
+            foreach ($m[1] as $table) {
+                self::assertArrayNotHasKey($table, $owner, "Table {$table} is created by migrations {$version} and " . ($owner[$table] ?? ''));
+                $owner[$table] = $version;
+            }
+        }
+    }
+
+    public function testConfigWrittenByVersion01StillLoads(): void
+    {
+        // Shape of a config.php written by the 0.1.x installer (static tokens, no oauth section).
+        $config = \VamsysMcp\Config::fromArray([
+            'database' => ['dsn' => 'mysql:host=localhost;port=3306;dbname=vmcp;charset=utf8mb4', 'username' => 'u', 'password' => 'p'],
+            'airlines' => ['swv' => ['name' => 'S', 'client_id' => '1', 'client_secret' => 's', 'weight_unit' => 'kg', 'rate_cap' => 60, 'pilots_api' => false]],
+            'http' => ['allowed_hosts' => ['vamsys-mcp.sw-virtual.eu'], 'bearer_token_sha256' => [hash('sha256', 'old')]],
+            'admin' => ['password_hash' => 'x', 'web_enabled' => true],
+            'app_key' => SecretBox::generateKey(),
+            'update' => ['repository' => 'DarrianCZE/vAMSYS-Unofficial-MCP'],
+        ]);
+
+        self::assertSame('https://vamsys-mcp.sw-virtual.eu', $config->baseUrl());
+        self::assertSame(['https://vamsys-mcp.sw-virtual.eu/mcp', 'https://vamsys-mcp.sw-virtual.eu'], $config->resourceUrls());
+        self::assertSame(['claude.ai', 'localhost', '127.0.0.1'], $config->oauthRedirectHosts);
+    }
+
     public function testOwnershipProofNeedsTheFileForThisSessionsCode(): void
     {
         $proof = new OwnershipProof($this->dir);
@@ -115,7 +145,7 @@ final class InstallTest extends TestCase
             'database' => ['dsn' => 'mysql:host=db;port=3306;dbname=vmcp;charset=utf8mb4', 'username' => 'u', 'password' => 'db-secret'],
             'airlines' => ['swv' => ['name' => 'S', 'client_id' => '1', 'client_secret' => 'oauth-secret', 'weight_unit' => 'kg', 'rate_cap' => 60, 'pilots_api' => false]],
             'admin' => ['password_hash' => password_hash('long enough password', PASSWORD_DEFAULT)],
-            'http' => ['bearer_token_sha256' => [hash('sha256', 't')]],
+            'http' => ['bearer_token_sha256' => [hash('sha256', 't')], 'session_dir' => '/kept'],
             'custom_key_from_newer_version' => 'kept',
         ];
         [$raw, $errors] = $this->service()->buildConfig([
@@ -130,7 +160,8 @@ final class InstallTest extends TestCase
         self::assertSame('lbs', $raw['airlines']['swv']['weight_unit']);
         self::assertFalse($raw['airlines']['swv']['pilots_api']);
         self::assertSame(['mcp.example.com', 'other.example.com'], $raw['http']['allowed_hosts']);
-        self::assertSame($existing['http']['bearer_token_sha256'], $raw['http']['bearer_token_sha256']);
+        self::assertArrayNotHasKey('bearer_token_sha256', $raw['http'], 'static tokens from <= 0.1.x are dropped');
+        self::assertSame('/kept', $raw['http']['session_dir']);
         self::assertSame($existing['admin']['password_hash'], $raw['admin']['password_hash']);
         self::assertSame('kept', $raw['custom_key_from_newer_version']);
         self::assertNotEmpty($raw['app_key']);

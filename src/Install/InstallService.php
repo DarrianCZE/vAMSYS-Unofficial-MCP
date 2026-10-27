@@ -10,6 +10,7 @@ use VamsysMcp\AirlineConfig;
 use VamsysMcp\Config;
 use VamsysMcp\Exception\ConfigException;
 use VamsysMcp\Exception\VamsysMcpException;
+use VamsysMcp\OAuth\McpUsers;
 use VamsysMcp\Paths;
 use VamsysMcp\RateLimiter;
 use VamsysMcp\SystemClock;
@@ -120,7 +121,7 @@ final class InstallService
         }
         $raw['http'] = (array) ($existing['http'] ?? []);
         $raw['http']['allowed_hosts'] = $hosts;
-        $raw['http']['bearer_token_sha256'] ??= [];
+        unset($raw['http']['bearer_token_sha256']); // static tokens were replaced by OAuth in 0.2.0
 
         if (array_key_exists('audit_log', $input)) {
             $raw['audit_log'] = (bool) $input['audit_log'];
@@ -160,11 +161,12 @@ final class InstallService
      * then write the config. Nothing is written if any step fails.
      *
      * @param array<string, mixed> $raw    from buildConfig()
-     * @param array{user: string, password: string}|null $ddl DB login allowed to CREATE/ALTER; null = use the app user
+     * @param array{user: string, password: string}|null $ddl       DB login allowed to CREATE/ALTER; null = use the app user
+     * @param array{username: string, password: string}|null $mcpUser first MCP user (who may connect Claude) to create
      *
-     * @return array{http_token: string|null, migrated: list<string>}
+     * @return array{migrated: list<string>, mcp_user: string|null}
      */
-    public function install(array $raw, ?array $ddl, bool $verifyAirlines, ?FtpCredentials $ftp): array
+    public function install(array $raw, ?array $ddl, bool $verifyAirlines, ?FtpCredentials $ftp, #[\SensitiveParameter] ?array $mcpUser = null): array
     {
         $config = Config::fromArray($raw);
         $pdo = self::connect($config->dbDsn, (string) $config->dbUser, (string) ($raw['database']['password'] ?? ''), 'the application user');
@@ -198,10 +200,14 @@ final class InstallService
             }
         }
 
-        $httpToken = null;
-        if (($raw['http']['bearer_token_sha256'] ?? []) === []) {
-            $httpToken = bin2hex(random_bytes(32));
-            $raw['http']['bearer_token_sha256'] = [hash('sha256', $httpToken)];
+        $createdUser = null;
+        if ($mcpUser !== null && trim($mcpUser['username']) !== '') {
+            try {
+                (new McpUsers($pdo))->create($mcpUser['username'], $mcpUser['password']);
+                $createdUser = strtolower(trim($mcpUser['username']));
+            } catch (ConfigException $e) {
+                throw new InstallException('MCP user: ' . $e->getMessage());
+            }
         }
 
         if ($ftp !== null) {
@@ -210,7 +216,7 @@ final class InstallService
 
         (new ConfigFile($this->paths->configFile()))->write($raw);
 
-        return ['http_token' => $httpToken, 'migrated' => $migrated];
+        return ['migrated' => $migrated, 'mcp_user' => $createdUser];
     }
 
     public static function connect(string $dsn, string $user, #[\SensitiveParameter] string $password, string $who): \PDO

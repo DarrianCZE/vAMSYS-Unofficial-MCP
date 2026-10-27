@@ -46,6 +46,7 @@ Ordinary shared hosting with PHP-FPM is enough. No SSH, Composer, Node.js, Redis
    - **Airlines:** key, OAuth client ID and secret, weight unit, rate cap, and whether the Pilots API is enabled.
    - **Host name** of the MCP endpoint.
    - **Admin password** for this admin page.
+   - **First MCP user:** the person who signs in when Claude connects. This login is separate from the admin password.
    - **FTP login (optional):** only needed for updates if PHP can't write its own files. It is stored encrypted.
 
    Submit the form. The installer then:
@@ -53,13 +54,13 @@ Ordinary shared hosting with PHP-FPM is enough. No SSH, Composer, Node.js, Redis
    - creates the tables;
    - verifies the vAMSYS credentials (one token request per airline);
    - writes `config/config.php` (outside the web root, `chmod 600`);
-   - shows your **MCP access token once**. Copy it.
-7. **Check:** `curl -i https://mcp.your-va.com/` should answer `401 Missing or invalid bearer token`. That means the server is running and protected.
+   - creates the MCP user.
+7. **Check:** `curl -i https://mcp.your-va.com/mcp` should answer `401` with a `WWW-Authenticate: Bearer resource_metadata=…` header. That means the server is running and asks clients to sign in.
 
 `https://mcp.your-va.com/setup.php` is also your admin page from now on:
 - the dashboard;
 - settings: airlines, secrets, admin password;
-- access tokens: create and revoke;
+- MCP users and active connections: add, disable, revoke;
 - FTP credentials;
 - updates.
 
@@ -108,7 +109,8 @@ Other settings, all documented in the example file:
 - **Rate limiting:** how long to wait for the rate limit.
 - **Tokens:** the token refresh margin.
 - **Audit log:** on or off.
-- **HTTP endpoint:** `http.allowed_hosts`, `http.bearer_token_sha256` and `http.session_dir`.
+- **HTTP endpoint:** `http.allowed_hosts`, `http.public_url` (optional) and `http.session_dir`.
+- **OAuth sign-in:** `oauth.allowed_redirect_hosts` and the token lifetimes.
 - **Admin page:** `admin.password_hash`, `admin.web_enabled`.
 - **Encryption:** `app_key`.
 - **Updates:** `update.repository`.
@@ -121,7 +123,8 @@ What's stored where:
 
 | Data | Location |
 |---|---|
-| Cached access tokens, rate-limit counters, login-throttle counters, optional audit log | Database |
+| Cached vAMSYS access tokens, rate-limit counters, login-throttle counters, optional audit log | Database |
+| MCP users (password hashes), OAuth clients, codes and tokens (SHA-256 hashes only) | Database |
 | FTP login for updates | Database, **encrypted**. The key (`app_key`) is in config.php, so neither a DB dump nor config.php alone reveals it. |
 | vAMSYS client secrets, DB password, admin password hash | config.php only. Never in the database. |
 
@@ -161,16 +164,23 @@ In `claude_desktop_config.json`:
 
 The STDIO server runs on your computer, so that computer needs PHP 8.4 and access to the database. For a database on your host, use the remote option below instead.
 
-### Remote over HTTP (your hosted endpoint)
+### Remote over HTTP with OAuth sign-in (your hosted endpoint)
 
-The endpoint URL is your domain, e.g. `https://mcp.your-va.com/`. Clients must send `Authorization: Bearer <token>`.
+The MCP server URL is **`https://mcp.your-va.com/mcp`**. Clients connect with OAuth. When you first connect, a sign-in page on your server opens; log in with an **MCP user** (created in the admin page or with `php bin/mcp-user.php add <name>`) and click **Allow**. The connection then stays signed in, renewing its tokens automatically, until you revoke it under *MCP users*.
 
+- **claude.ai / Claude Desktop / Claude mobile:**
+  1. Go to Customize → Connectors → **Add custom connector**.
+  2. Paste the URL.
+  3. Keep the default authentication (**Sign in now**) and OAuth client (**Use Claude's published identity**). **Register automatically** works too.
+  4. Click **Connect** and sign in.
 - **Claude Code:**
   ```bash
-  claude mcp add --transport http vamsys https://mcp.your-va.com/ --header "Authorization: Bearer YOUR_TOKEN"
+  claude mcp add --transport http vamsys https://mcp.your-va.com/mcp
   ```
-- **claude.ai / Claude Desktop custom connector:** Customize → Connectors → Add custom connector, enter the URL, choose **No sign-in**, and under **Request headers** add `Authorization` with the value `Bearer YOUR_TOKEN`. Anthropic currently lists request-header authentication as a **beta available to a limited set of organisations**. If you don't see "Request headers", claude.ai can't use this endpoint yet; see [Open questions](#open-questions).
-- **MCP Inspector:** `npx @modelcontextprotocol/inspector`, choose "Streamable HTTP", enter the URL and add the Authorization header.
+  Then run `/mcp` in Claude Code and choose *Authenticate*. A browser window opens for the sign-in.
+- **MCP Inspector:** `npx @modelcontextprotocol/inspector`, choose "Streamable HTTP", enter the URL and use the OAuth flow.
+
+Other clients only work if their redirect host is allowed in `oauth.allowed_redirect_hosts`. By default that's `claude.ai`, plus `localhost` for Claude Code and the Inspector.
 
 ## Tools
 
@@ -194,8 +204,14 @@ All tools are marked read-only. Outputs are kept small on purpose, because every
   - If you don't need it, disable it with `'admin' => ['web_enabled' => false]`.
 - **A stored FTP login gives write access to your site.** Store it only if PHP can't write its own files (the *FTP* page tells you), and prefer an FTP account restricted to the installation folder.
 - **Updates are signed.** The updater installs only packages signed with the project's release key, so a tampered download or a compromised download link can't push code to your server.
-- **The HTTP endpoint fails closed.** Without a configured token hash it refuses all requests. Tokens are stored only as SHA-256 hashes. Requests for host names not in `http.allowed_hosts` are rejected (DNS-rebinding protection).
-- **Treat bearer tokens like passwords.** Anyone with the token can read your airline data through the server. Rotate it by generating a new one and removing the old hash.
+- **OAuth sign-in protects the HTTP endpoint:**
+  - Only people with an **MCP user** can connect a client, and MCP users get read-only data access, not the admin page.
+  - The flow is OAuth 2.1 with mandatory PKCE.
+  - Access tokens live 1 hour. Refresh tokens rotate on every use, and a reused refresh token revokes the whole connection.
+  - Codes and tokens are stored only as SHA-256 hashes.
+  - Disabling a user or revoking a connection takes effect immediately.
+- **Sign-in redirects are restricted.** After sign-in, browsers are only sent back to hosts in `oauth.allowed_redirect_hosts` (default `claude.ai` and `localhost`), and the sign-in page shows the target host. A registered "client" pointing at someone else's site can't phish an approval.
+- **Unknown host names are rejected.** Requests for host names not in `http.allowed_hosts` are refused (DNS-rebinding protection).
 - **Read-only.** Version 1 never sends POST/PUT/DELETE to the vAMSYS API.
 
 ## Testing locally
@@ -234,13 +250,12 @@ The workflow then:
 
 - More question-oriented read tools: PIREP review queues, fleet/aircraft summaries, airport lookups, statistics.
 - **Write tools with a dry-run/diff step.** A write would first return exactly what would change (a diff against the current vAMSYS data) and apply it only after explicit confirmation. Writes will respect vAMSYS semantics such as "explicit `null` clears a value, omitting a field keeps it".
-- OAuth for the HTTP endpoint (for claude.ai without the request-header beta).
 - Optional cache of airport ID ↔ ICAO codes to enrich route output.
 
 ## Open questions
 
-1. **HTTP authentication.** v1 uses a static bearer token. It works with Claude Code, Claude Desktop config, MCP Inspector, and claude.ai **only where the "Request headers" beta is available**. Broad claude.ai support needs OAuth: either Dynamic Client Registration or Anthropic's Client ID Metadata Document, with an authorization server. Is a built-in minimal OAuth server worth it for shared hosting, or should operators put an external OAuth provider in front?
-2. **Token lifetime.** The OpenAPI spec says tokens last 24 hours (`expires_in` 86400); operators report 7 days (604800). The server simply trusts `expires_in` from each response.
+1. **Other MCP clients.** The built-in OAuth server is tested against Claude's requirements (claude.ai, Desktop, Claude Code) and the MCP Inspector. Other clients need their redirect host added to `oauth.allowed_redirect_hosts` and may differ in details.
+2. **vAMSYS token lifetime.** The OpenAPI spec says tokens last 24 hours (`expires_in` 86400); operators report 7 days (604800). The server simply trusts `expires_in` from each response.
 3. **Maximum `page[size]`.** It isn't documented. The default here is 100; lower `vamsys.page_size` if vAMSYS rejects it.
 4. **Does `/oauth/token` count against the 100/min limit?** This server counts it, to be safe.
 5. **Protocol versions.** The server accepts both the stateless `2026-07-28` protocol and the older session-based one, so it works with any current client. Once all clients use the new protocol, the session directory can go.

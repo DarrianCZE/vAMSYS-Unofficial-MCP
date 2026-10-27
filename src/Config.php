@@ -6,6 +6,7 @@ namespace VamsysMcp;
 
 use VamsysMcp\Exception\ConfigException;
 use VamsysMcp\Exception\UnknownAirlineException;
+use VamsysMcp\OAuth\RedirectPolicy;
 
 /**
  * Server configuration, loaded from a PHP file that lives outside the web root.
@@ -16,7 +17,7 @@ final class Config
     /**
      * @param array<string, AirlineConfig> $airlines
      * @param list<string>                 $httpAllowedHosts
-     * @param list<string>                 $httpBearerTokenHashes SHA-256 hex digests of accepted bearer tokens
+     * @param list<string>                 $oauthRedirectHosts    hosts OAuth clients may redirect to after sign-in
      */
     public function __construct(
         public readonly array $airlines,
@@ -32,8 +33,11 @@ final class Config
         public readonly int $httpTimeoutSeconds = 20,
         public readonly bool $auditLog = false,
         public readonly array $httpAllowedHosts = [],
-        public readonly array $httpBearerTokenHashes = [],
         public readonly ?string $sessionDir = null,
+        public readonly ?string $publicUrl = null,
+        public readonly array $oauthRedirectHosts = RedirectPolicy::DEFAULT_HOSTS,
+        public readonly int $oauthAccessTokenTtl = 3600,
+        public readonly int $oauthRefreshTokenTtl = 30 * 86400,
     ) {
         if ($airlines === []) {
             throw new ConfigException('No airlines configured.');
@@ -41,10 +45,8 @@ final class Config
         if ($pageSize < 1 || $maxPagesPerCall < 1 || $maxRateWaitSeconds < 0) {
             throw new ConfigException('page_size and max_pages_per_call must be >= 1, max_rate_wait_seconds >= 0.');
         }
-        foreach ($httpBearerTokenHashes as $hash) {
-            if (preg_match('/^[0-9a-f]{64}$/', $hash) !== 1) {
-                throw new ConfigException('http.bearer_token_sha256 entries must be lowercase SHA-256 hex digests.');
-            }
+        if ($oauthAccessTokenTtl < 60 || $oauthRefreshTokenTtl < $oauthAccessTokenTtl) {
+            throw new ConfigException('oauth.access_token_ttl must be >= 60 and refresh_token_ttl >= access_token_ttl.');
         }
     }
 
@@ -73,6 +75,7 @@ final class Config
         $db = (array) ($raw['database'] ?? []);
         $vamsys = (array) ($raw['vamsys'] ?? []);
         $http = (array) ($raw['http'] ?? []);
+        $oauth = (array) ($raw['oauth'] ?? []);
 
         return new self(
             airlines: $airlines,
@@ -88,12 +91,39 @@ final class Config
             httpTimeoutSeconds: (int) ($vamsys['http_timeout_seconds'] ?? 20),
             auditLog: (bool) ($raw['audit_log'] ?? false),
             httpAllowedHosts: array_values(array_map('strval', (array) ($http['allowed_hosts'] ?? []))),
-            httpBearerTokenHashes: array_values(array_map(
-                static fn ($h): string => strtolower((string) $h),
-                (array) ($http['bearer_token_sha256'] ?? []),
-            )),
             sessionDir: isset($http['session_dir']) ? (string) $http['session_dir'] : null,
+            publicUrl: isset($http['public_url']) ? rtrim((string) $http['public_url'], '/') : null,
+            oauthRedirectHosts: array_values(array_map('strval', (array) ($oauth['allowed_redirect_hosts'] ?? RedirectPolicy::DEFAULT_HOSTS))),
+            oauthAccessTokenTtl: (int) ($oauth['access_token_ttl'] ?? 3600),
+            oauthRefreshTokenTtl: (int) ($oauth['refresh_token_ttl'] ?? 30 * 86400),
         );
+    }
+
+    /**
+     * Public base URL of this installation without trailing slash: http.public_url,
+     * else https://<first allowed host>. It is the OAuth issuer and the base of
+     * the MCP resource URLs.
+     */
+    public function baseUrl(): string
+    {
+        if ($this->publicUrl !== null && $this->publicUrl !== '') {
+            return $this->publicUrl;
+        }
+        if ($this->httpAllowedHosts === []) {
+            throw new ConfigException('Set http.allowed_hosts (or http.public_url) to the host name of the MCP endpoint.');
+        }
+
+        return 'https://' . strtolower($this->httpAllowedHosts[0]);
+    }
+
+    /**
+     * MCP resource URLs (RFC 8707), normalized without trailing slash: /mcp (recommended) and the site root.
+     *
+     * @return list<string>
+     */
+    public function resourceUrls(): array
+    {
+        return [$this->baseUrl() . '/mcp', $this->baseUrl()];
     }
 
     public function airline(string $key): AirlineConfig

@@ -54,13 +54,22 @@ return [
     'http' => [
         // Host names this endpoint is served under (DNS-rebinding protection).
         'allowed_hosts' => ['mcp.example.com'],
-        // SHA-256 hashes of accepted bearer tokens. Generate with: php bin/generate-token.php
-        'bearer_token_sha256' => [],
+        // Optional: public base URL if it is not https://<first allowed host> (no trailing slash).
+        // 'public_url' => 'https://mcp.example.com',
         // Session files for clients on the older, handshake-based protocol. Must be outside the web root.
         'session_dir' => dirname(__DIR__) . '/var/sessions',
     ],
 
-    // Web admin at /setup.php (settings, access tokens, FTP, updates).
+    // OAuth sign-in for MCP clients (Claude etc.). Users are managed under "MCP users" in the admin page.
+    'oauth' => [
+        // Hosts OAuth clients may be sent back to after sign-in. claude.ai = Claude web/Desktop/mobile;
+        // localhost/127.0.0.1 = Claude Code and MCP Inspector. Add e.g. 'chatgpt.com' only if you use that client.
+        'allowed_redirect_hosts' => ['claude.ai', 'localhost', '127.0.0.1'],
+        'access_token_ttl' => 3600,          // seconds
+        'refresh_token_ttl' => 30 * 86400,   // seconds; refresh tokens rotate on every use
+    ],
+
+    // Web admin at /setup.php (settings, MCP users, FTP, updates).
     'admin' => [
         // password_hash() of the admin password. Forgot it? Use "Forgot the password?" on the login page.
         'password_hash' => '',
